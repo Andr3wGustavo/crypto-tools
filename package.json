@@ -1,0 +1,45 @@
+{
+  "name": "cortex-crypto-sentinel",
+  "version": "2.0.0",
+  "description": "Unified Crypto Intelligence Hub: DEX Radar, Anti-Honeypot Security, AI Due Diligence, Discord Terminal, Binance Adaptive Market Maker, and Compound PnL Tracker.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [
+    "crypto",
+    "dexscreener",
+    "ai",
+    "gemini",
+    "market-maker",
+    "binance",
+    "discord-bot",
+    "goplus",
+    "rugcheck"
+  ],
+  "author": "Antigravity Dev",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^5.10.2",
+    "axios": "^1.7.9",
+    "bignumber.js": "^9.1.2",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "winston": "^3.11.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/ws": "^8.5.10",
+    "prisma": "^5.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.3.3"
+  }
+}

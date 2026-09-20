@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// 1. TOKEN RADAR & DUE DILIGENCE (DEX)
+// ==========================================
+model Token {
+  id              String    @id @default(uuid())
+  address         String    @unique
+  name            String
+  symbol          String
+  chainId         String    // solana, ethereum, bsc, base, arbitrum, etc.
+  dexId           String    // raydium, uniswap, pancakeswap, etc.
+  url             String
+  imageUrl        String?
+
+  // Market Metrics at Discovery
+  liquidity       Float
+  fdv             Float
+  price           Float
+  priceNative     String?
+  volume24h       Float     @default(0)
+  priceChange24h  Float     @default(0)
+  pairCreatedAt   DateTime?
+  discoveredAt    DateTime  @default(now())
+
+  // Security Audit (GoPlus / RugCheck)
+  isHoneypot      Boolean   @default(false)
+  buyTax          Float     @default(0)
+  sellTax         Float     @default(0)
+  isMintable      Boolean   @default(false)
+  hasBlacklist    Boolean   @default(false)
+  liquidityLocked Boolean   @default(false)
+  securityReport  String?   // JSON detailed payload
+
+  // AI Due Diligence (Gemini 2.0 / Flash)
+  riskScore       Int?      // 0-100 (100 = Safe/Gem, 0 = High Scam Risk)
+  aiAnalysis      String?   // Executive summary
+  isScam          Boolean   @default(false)
+  isWinner        Boolean   @default(false)
+
+  // RAG / Semantic Memory
+  embedding       String?   // Serialized vector array
+  tags            String?   // e.g. "AI, Meme, DePIN, Utility"
+
+  logs            TokenLog[]
+  positions       Position[]
+}
+
+model TokenLog {
+  id        String   @id @default(uuid())
+  tokenId   String
+  token     Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  message   String
+  level     String   // INFO, WARN, ERROR, SUCCESS
+  timestamp DateTime @default(now())
+}
+
+// ==========================================
+// 2. TRADING & ORDERS (BINANCE CEX)
+// ==========================================
+model Trade {
+  id            String   @id @default(uuid())
+  symbol        String   // e.g. BTCUSDT, ETHUSDC
+  orderId       String   @unique
+  side          String   // BUY, SELL
+  price         Float
+  quantity      Float
+  quoteQuantity Float
+  fee           Float    @default(0)
+  isMaker       Boolean  @default(true)
+  spreadPct     Float?
+  skewPct       Float?
+  pnl           Float?
+  status        String   // PENDING, FILLED, CANCELED, EXPIRED
+  strategy      String   // MARKET_MAKER, COMPOUND_DCA
+  createdAt     DateTime @default(now())
+}
+
+// ==========================================
+// 3. GAIN & POSITION TRACKER (TRADE-GAIN)
+// ==========================================
+model Position {
+  id              String    @id @default(uuid())
+  tokenId         String?
+  token           Token?    @relation(fields: [tokenId], references: [id])
+  symbol          String
+  chain           String
+  tokenAddress    String
+  entryPrice      Float
+  currentPrice    Float
+  peakPrice       Float
+  currentGainPct  Float     @default(0)
+  highestGainPct  Float     @default(0)
+  trailingStopPct Float     @default(15.0) // E.g. 15% drop from peak triggers alert
+  status          String    @default("ACTIVE") // ACTIVE, CLOSED, STOPPED_OUT
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// ==========================================
+// 4. MACRO MARKET METRICS (CRYPTO-INFO)
+// ==========================================
+model MacroMetric {
+  id                     String   @id @default(uuid())
+  fearAndGreedIndex      Int
+  fearAndGreedSentiment  String   // Extreme Fear, Fear, Neutral, Greed, Extreme Greed
+  btcDominance           Float?
+  ethGasGwei             Float?
+  timestamp              DateTime @default(now())
+}
