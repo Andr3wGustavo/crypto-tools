@@ -1,6 +1,8 @@
 import { env } from './config/env';
 import { logger } from './utils/logger';
 import { MarketMakerEngine } from './modules/trading/market-maker.engine';
+import { CompoundService } from './modules/trading/compound.service';
+import { BinanceUserDataStreamService } from './modules/trading/binance-user-stream.service';
 import { DiscordBotService } from './modules/discord/bot';
 
 async function bootstrap() {
@@ -18,7 +20,16 @@ async function bootstrap() {
 
     logger.info(`Starting Cortex Crypto in [${env.NODE_ENV}] mode...`);
 
-    // 1. Initialize Market Maker Engine
+    // 1. Initialize Compound Service
+    const compoundService = new CompoundService(env.MM_MAX_POSITION_USD, 0.5);
+
+    // 2. Initialize Binance User Data Stream (Execution Reports)
+    const userStream = new BinanceUserDataStreamService(compoundService);
+    if (env.BINANCE_API_KEY) {
+        await userStream.start();
+    }
+
+    // 3. Initialize Market Maker Engine
     const mmEngine = new MarketMakerEngine(env.MM_SYMBOL);
     if (env.BINANCE_API_KEY && env.BINANCE_SECRET) {
         logger.info(`Starting Binance Market Maker on ${env.MM_SYMBOL}...`);
@@ -27,7 +38,7 @@ async function bootstrap() {
         logger.info('Binance API Keys not set. MM Engine available on-demand.');
     }
 
-    // 2. Initialize Discord Bot (Scout, Radar, Slash Commands, Gain Tracker)
+    // 4. Initialize Discord Bot (Scout, Radar, Slash Commands, Gain Tracker)
     const discordBot = new DiscordBotService(mmEngine);
     if (env.DISCORD_TOKEN) {
         logger.info('Connecting Discord Bot Sentinel...');
@@ -36,10 +47,11 @@ async function bootstrap() {
         logger.warn('DISCORD_TOKEN not configured. Running in headless terminal mode.');
     }
 
-    // 3. Graceful Shutdown Handlers
+    // 5. Graceful Shutdown Handlers
     const shutdown = () => {
         logger.info('Shutting down Cortex Crypto gracefully...');
         mmEngine.stop();
+        userStream.stop();
         process.exit(0);
     };
 
