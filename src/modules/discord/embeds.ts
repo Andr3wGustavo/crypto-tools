@@ -1,4 +1,4 @@
-import { EmbedBuilder } from 'discord.js';
+import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { DexPair } from '../scout/dexscreener.service';
 import { SecurityAuditResult } from '../scout/security.service';
 import { AIDueDiligenceReport } from '../ai/gemini.service';
@@ -14,42 +14,64 @@ export class DiscordEmbedFactory {
         const color = score >= 80 ? 0x00FF88 : score >= 50 ? 0xFFA500 : 0xFF2244;
 
         const embed = new EmbedBuilder()
-            .setTitle(`${score >= 80 ? '💎 GEM DETECTED' : '⚡ TOKEN REPORT'}: ${pair.baseToken.name} ($${pair.baseToken.symbol})`)
+            .setTitle(`${score >= 80 ? 'GEM CANDIDATE' : 'TOKEN AUDIT'}: ${pair.baseToken.name} ($${pair.baseToken.symbol})`)
             .setURL(pair.url)
             .setColor(color)
             .setDescription(ai?.summary || 'Automated due diligence audit completed.')
             .addFields(
-                { name: '💵 Price', value: `$${pair.priceUsd}`, inline: true },
-                { name: '💧 Liquidity', value: `$${(pair.liquidity?.usd || 0).toLocaleString()}`, inline: true },
-                { name: '📊 FDV', value: `$${(pair.fdv || 0).toLocaleString()}`, inline: true },
-                { name: '📈 24h Volume', value: `$${(pair.volume?.h24 || 0).toLocaleString()}`, inline: true },
-                { name: '🕒 24h Change', value: `${pair.priceChange?.h24}%`, inline: true },
-                { name: '🧠 AI Score', value: `**${score}/100** (${ai?.sentiment || 'ANALYZED'})`, inline: true },
+                { name: 'Price', value: `$${pair.priceUsd}`, inline: true },
+                { name: 'Liquidity', value: `$${(pair.liquidity?.usd || 0).toLocaleString()}`, inline: true },
+                { name: 'FDV', value: `$${(pair.fdv || 0).toLocaleString()}`, inline: true },
+                { name: '24h Volume', value: `$${(pair.volume?.h24 || 0).toLocaleString()}`, inline: true },
+                { name: '24h Change', value: `${pair.priceChange?.h24}%`, inline: true },
+                { name: 'AI Score', value: `**${score}/100** (${ai?.sentiment || 'ANALYZED'})`, inline: true },
                 {
-                    name: '🛡️ Security Audit',
+                    name: 'Security Audit',
                     value: security?.isHoneypot
-                        ? '🚨 **HONEYPOT DETECTED**'
-                        : `✅ Honeypot: Free | Buy Tax: ${security?.buyTax.toFixed(1)}% | Sell Tax: ${security?.sellTax.toFixed(1)}%`,
+                        ? '**HONEYPOT DETECTED** - Do Not Trade'
+                        : `Honeypot: Free | Buy Tax: ${security?.buyTax.toFixed(1)}% | Sell Tax: ${security?.sellTax.toFixed(1)}% | Mintable: ${security?.isMintable ? 'YES' : 'NO'}`,
                     inline: false
                 }
             );
 
         if (ai?.strengths && ai.strengths.length > 0) {
-            embed.addFields({ name: '🌟 Strengths', value: ai.strengths.map(s => `• ${s}`).join('\n') });
+            embed.addFields({ name: 'Key Strengths', value: ai.strengths.map(s => `- ${s}`).join('\n') });
         }
 
         if (ai?.risks && ai.risks.length > 0) {
-            embed.addFields({ name: '⚠️ Risk Factors', value: ai.risks.map(r => `• ${r}`).join('\n') });
+            embed.addFields({ name: 'Risk Factors', value: ai.risks.map(r => `- ${r}`).join('\n') });
         }
 
         if (pair.info?.imageUrl) {
             embed.setThumbnail(pair.info.imageUrl);
         }
 
-        embed.setFooter({ text: `DexScreener • Chain: ${pair.chainId.toUpperCase()} • DEX: ${pair.dexId.toUpperCase()}` })
+        embed.setFooter({ text: `DexScreener | Chain: ${pair.chainId.toUpperCase()} | DEX: ${pair.dexId.toUpperCase()}` })
             .setTimestamp();
 
         return embed;
+    }
+
+    /**
+     * Create interactive action row buttons for token alerts
+     */
+    static createTokenActionRow(pair: DexPair): ActionRowBuilder<ButtonBuilder> {
+        const viewChartButton = new ButtonBuilder()
+            .setLabel('DexScreener Chart')
+            .setStyle(ButtonStyle.Link)
+            .setURL(pair.url);
+
+        const trackButton = new ButtonBuilder()
+            .setCustomId(`track_${pair.pairAddress}_${pair.baseToken.symbol}`)
+            .setLabel('Track Position')
+            .setStyle(ButtonStyle.Success);
+
+        const simulateSwapButton = new ButtonBuilder()
+            .setCustomId(`swap_${pair.baseToken.address}_${pair.baseToken.symbol}`)
+            .setLabel('Simulate Swap')
+            .setStyle(ButtonStyle.Primary);
+
+        return new ActionRowBuilder<ButtonBuilder>().addComponents(viewChartButton, trackButton, simulateSwapButton);
     }
 
     /**
@@ -60,14 +82,14 @@ export class DiscordEmbedFactory {
         const color = fng.value > 60 ? 0x00FF88 : fng.value < 40 ? 0xFF3333 : 0xFFAA00;
 
         return new EmbedBuilder()
-            .setTitle('🌐 Crypto Macro Market Overview')
+            .setTitle('Crypto Macro Market Overview')
             .setColor(color)
             .addFields(
-                { name: '😱 Fear & Greed Index', value: `**${fng.value}/100** (${fng.classification})`, inline: true },
-                { name: '₿ Bitcoin (BTC)', value: `$${data.btcPriceUsd.toLocaleString()}`, inline: true },
-                { name: 'Ξ Ethereum (ETH)', value: `$${data.ethPriceUsd.toLocaleString()}`, inline: true }
+                { name: 'Fear and Greed Index', value: `**${fng.value}/100** (${fng.classification})`, inline: true },
+                { name: 'Bitcoin (BTC)', value: `$${data.btcPriceUsd.toLocaleString()}`, inline: true },
+                { name: 'Ethereum (ETH)', value: `$${data.ethPriceUsd.toLocaleString()}`, inline: true }
             )
-            .setFooter({ text: 'Alternative.me & Binance Market Data' })
+            .setFooter({ text: 'Data from Alternative.me and Binance Market Data' })
             .setTimestamp();
     }
 
@@ -77,7 +99,7 @@ export class DiscordEmbedFactory {
     static createPositionAlertEmbed(alert: PositionAlert): EmbedBuilder {
         const isStop = alert.type === 'TRAILING_STOP';
         return new EmbedBuilder()
-            .setTitle(isStop ? '🛑 TRAILING STOP TRIGGERED' : '🎯 TAKE PROFIT MILESTONE')
+            .setTitle(isStop ? 'TRAILING STOP TRIGGERED' : 'TAKE PROFIT MILESTONE')
             .setColor(isStop ? 0xFF0033 : 0x00E676)
             .setDescription(alert.message)
             .addFields(

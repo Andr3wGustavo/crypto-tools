@@ -5,7 +5,8 @@ import {
     Routes,
     SlashCommandBuilder,
     TextChannel,
-    ChatInputCommandInteraction
+    ChatInputCommandInteraction,
+    ButtonInteraction
 } from 'discord.js';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
@@ -14,8 +15,10 @@ import { SecurityService } from '../scout/security.service';
 import { FilterService } from '../scout/filter.service';
 import { GeminiService } from '../ai/gemini.service';
 import { MemoryService } from '../rag/memory.service';
+import { VectorService } from '../rag/vector.service';
 import { MacroMarketService } from '../market/macro.service';
 import { GainTrackerService } from '../tracker/gain-tracker.service';
+import { JupiterService } from '../dex-trader/jupiter.service';
 import { DiscordEmbedFactory } from './embeds';
 import { MarketMakerEngine } from '../trading/market-maker.engine';
 
@@ -38,20 +41,23 @@ export class DiscordBotService {
 
     private setupEventHandlers() {
         this.client.once('ready', async () => {
-            logger.info(`🤖 Cortex Crypto Bot online as ${this.client.user?.tag}!`);
+            logger.info(`Discord Bot online as ${this.client.user?.tag}`);
             await this.registerSlashCommands();
             this.startAutomatedRadar();
             this.startGainTrackerLoop();
         });
 
         this.client.on('interactionCreate', async (interaction) => {
-            if (!interaction.isChatInputCommand()) return;
-            await this.handleSlashCommand(interaction);
+            if (interaction.isChatInputCommand()) {
+                await this.handleSlashCommand(interaction);
+            } else if (interaction.isButton()) {
+                await this.handleButtonInteraction(interaction);
+            }
         });
     }
 
     /**
-     * Register slash commands with Discord API
+     * Register comprehensive slash commands with Discord API
      */
     private async registerSlashCommands() {
         if (!env.DISCORD_TOKEN || !env.DISCORD_CLIENT_ID) {
@@ -62,21 +68,60 @@ export class DiscordBotService {
         const commands = [
             new SlashCommandBuilder()
                 .setName('analyze')
-                .setDescription('Perform instant AI & Security audit on any token or pair address')
+                .setDescription('Perform instant AI and Security audit on any token or pair address')
                 .addStringOption(opt =>
                     opt.setName('address')
                         .setDescription('Token contract or Dex pair address')
                         .setRequired(true)
                 ),
             new SlashCommandBuilder()
+                .setName('ask')
+                .setDescription('Query RAG historical memory and AI for market intelligence')
+                .addStringOption(opt =>
+                    opt.setName('query')
+                        .setDescription('Question or pattern to query')
+                        .setRequired(true)
+                ),
+            new SlashCommandBuilder()
+                .setName('track')
+                .setDescription('Track a position with automated trailing stop-loss')
+                .addStringOption(opt =>
+                    opt.setName('address')
+                        .setDescription('Token pair contract address')
+                        .setRequired(true)
+                )
+                .addNumberOption(opt =>
+                    opt.setName('entry_price')
+                        .setDescription('Your entry price in USD')
+                        .setRequired(true)
+                )
+                .addNumberOption(opt =>
+                    opt.setName('trailing_stop')
+                        .setDescription('Trailing stop drop percentage (default 15%)')
+                        .setRequired(false)
+                ),
+            new SlashCommandBuilder()
+                .setName('swap')
+                .setDescription('Simulate DEX swap quote and price impact via Jupiter')
+                .addStringOption(opt =>
+                    opt.setName('mint')
+                        .setDescription('Token mint address (Solana)')
+                        .setRequired(true)
+                )
+                .addNumberOption(opt =>
+                    opt.setName('amount_sol')
+                        .setDescription('Amount of SOL to swap (default 0.1 SOL)')
+                        .setRequired(false)
+                ),
+            new SlashCommandBuilder()
                 .setName('radar')
-                .setDescription('View recently discovered gems and scanned tokens'),
+                .setDescription('View database metrics on scanned tokens, verified gems, and scams'),
             new SlashCommandBuilder()
                 .setName('market')
-                .setDescription('Get macro market status (Fear & Greed, BTC, ETH)'),
+                .setDescription('Display macro market status, Fear and Greed index, BTC and ETH'),
             new SlashCommandBuilder()
                 .setName('mm')
-                .setDescription('Check Binance Adaptive Market Maker status')
+                .setDescription('Control and inspect the Binance Adaptive Market Maker')
                 .addStringOption(opt =>
                     opt.setName('action')
                         .setDescription('Action to execute')
@@ -89,7 +134,7 @@ export class DiscordBotService {
                 ),
             new SlashCommandBuilder()
                 .setName('gains')
-                .setDescription('List actively tracked positions and trailing stops')
+                .setDescription('Display actively tracked positions and trailing stop levels')
         ];
 
         try {
@@ -108,7 +153,7 @@ export class DiscordBotService {
                 );
             }
 
-            logger.info('✅ Discord Slash Commands registered successfully!');
+            logger.info('Discord Slash Commands registered successfully.');
         } catch (error: any) {
             logger.error(`Failed to register slash commands: ${error.message}`);
         }
@@ -127,14 +172,14 @@ export class DiscordBotService {
 
                 const pair = await DexScreenerService.getPairByAddress(address);
                 if (!pair) {
-                    await interaction.editReply(`❌ Could not find pair or token for address: \`${address}\``);
+                    await interaction.editReply(`Could not locate pair or token for address: \`${address}\``);
                     return;
                 }
 
                 const security = await SecurityService.auditToken(pair.chainId, pair.baseToken.address);
                 const aiReport = await GeminiService.analyzeToken(pair, security);
 
-                // Save to memory
+                // Save to database memory
                 await MemoryService.recordToken({
                     ...pair,
                     address: pair.pairAddress,
@@ -149,8 +194,57 @@ export class DiscordBotService {
                     ...security
                 });
 
+                // Attach vector embedding in background
+                VectorService.attachEmbedding(
+                    pair.pairAddress,
+                    `${pair.baseToken.name} (${pair.baseToken.symbol}) ${pair.chainId} ${aiReport.summary}`
+                ).catch(() => {});
+
                 const embed = DiscordEmbedFactory.createTokenEmbed(pair, security, aiReport);
-                await interaction.editReply({ embeds: [embed] });
+                const actionRow = DiscordEmbedFactory.createTokenActionRow(pair);
+                await interaction.editReply({ embeds: [embed], components: [actionRow] });
+
+            } else if (commandName === 'ask') {
+                await interaction.deferReply();
+                const query = interaction.options.getString('query', true);
+                const similar = await VectorService.searchSimilarTokens(query, 3);
+
+                let replyText = `**RAG Memory Query**: "${query}"\n\n`;
+                if (similar.length === 0) {
+                    replyText += 'No historically similar tokens found in local memory database.';
+                } else {
+                    replyText += '**Top Historical Matches in Memory:**\n';
+                    for (const s of similar) {
+                        const status = s.isWinner ? 'WINNER' : s.isScam ? 'SCAM' : 'NEUTRAL';
+                        replyText += `- **${s.name} ($${s.symbol})**: Similarity ${(s.similarity * 100).toFixed(1)}% | Status: [${status}] | Score: ${s.riskScore}/100\n  *Summary: ${s.summary || 'N/A'}*\n`;
+                    }
+                }
+                await interaction.editReply(replyText);
+
+            } else if (commandName === 'track') {
+                await interaction.deferReply();
+                const address = interaction.options.getString('address', true);
+                const entryPrice = interaction.options.getNumber('entry_price', true);
+                const trailingStop = interaction.options.getNumber('trailing_stop') || 15.0;
+
+                const pair = await DexScreenerService.getPairByAddress(address);
+                const symbol = pair ? pair.baseToken.symbol : 'TOKEN';
+                const chain = pair ? pair.chainId : 'unknown';
+
+                await GainTrackerService.addPosition(symbol, chain, address, entryPrice, trailingStop);
+                await interaction.editReply(`Now tracking **${symbol}** (${chain})\nEntry: $${entryPrice} | Trailing Stop: ${trailingStop}% drop from peak.`);
+
+            } else if (commandName === 'swap') {
+                await interaction.deferReply();
+                const mint = interaction.options.getString('mint', true);
+                const amountSol = interaction.options.getNumber('amount_sol') || 0.1;
+
+                const sim = await JupiterService.simulateSwap(mint, amountSol);
+                if (sim.success) {
+                    await interaction.editReply(`**Jupiter Swap Route Simulation**\n${sim.summary}\nPrice Impact: **${sim.priceImpactPct.toFixed(2)}%** | Estimated Base Fee: **${sim.estimatedFeeSol} SOL**`);
+                } else {
+                    await interaction.editReply(`Simulation failed: ${sim.summary}`);
+                }
 
             } else if (commandName === 'market') {
                 await interaction.deferReply();
@@ -161,20 +255,20 @@ export class DiscordBotService {
             } else if (commandName === 'radar') {
                 await interaction.deferReply();
                 const stats = await MemoryService.getGlobalStats();
-                await interaction.editReply(`📊 **Radar Memory Stats**\n• Total Scanned: **${stats.totalScanned}**\n• Gems Identified: **${stats.gems}**\n• Scams Filtered: **${stats.scams}**`);
+                await interaction.editReply(`**Radar Memory Database**\n- Total Scanned Tokens: **${stats.totalScanned}**\n- Verified Gems: **${stats.gems}**\n- Scams Blocked: **${stats.scams}**`);
 
             } else if (commandName === 'mm') {
                 const action = interaction.options.getString('action') || 'status';
 
                 if (action === 'start') {
                     this.mmEngine.start();
-                    await interaction.reply('🟢 Started Binance Market Maker Engine.');
+                    await interaction.reply('Started Binance Market Maker Engine.');
                 } else if (action === 'stop') {
                     this.mmEngine.stop();
-                    await interaction.reply('🛑 Stopped Binance Market Maker Engine.');
+                    await interaction.reply('Stopped Binance Market Maker Engine.');
                 } else {
                     const status = this.mmEngine.getStatus();
-                    await interaction.reply(`⚙️ **Binance MM Status [${status.symbol}]**\n• Running: **${status.isRunning ? 'YES 🟢' : 'NO 🔴'}**\n• Cycles Completed: **${status.cycleCount}**\n• Mid Price: **$${status.lastMidPrice.toFixed(2)}**\n• Book Imbalance: **${(status.lastImbalance * 100).toFixed(2)}%**\n• Volatility (Respiro): **${(status.volatilityRespiro * 100).toFixed(4)}%**`);
+                    await interaction.reply(`**Binance MM Status [${status.symbol}]**\n- Active: **${status.isRunning ? 'YES' : 'NO'}**\n- Cycles Completed: **${status.cycleCount}**\n- Current Mid: **$${status.lastMidPrice.toFixed(2)}**\n- Depth Imbalance: **${(status.lastImbalance * 100).toFixed(2)}%**\n- Volatility (Respiro): **${(status.volatilityRespiro * 100).toFixed(4)}%**`);
                 }
 
             } else if (commandName === 'gains') {
@@ -185,15 +279,55 @@ export class DiscordBotService {
                     return;
                 }
 
-                const list = positions.map(p => `• **${p.symbol}** (${p.chain}): Entry $${p.entryPrice} | Now $${p.currentPrice} | PnL: **${p.currentGainPct >= 0 ? '+' : ''}${p.currentGainPct.toFixed(1)}%** (Peak: +${p.highestGainPct.toFixed(1)}%)`).join('\n');
-                await interaction.editReply(`📈 **Active Tracked Positions:**\n${list}`);
+                const list = positions.map(p => `- **${p.symbol}** (${p.chain}): Entry $${p.entryPrice} | Current $${p.currentPrice} | PnL: **${p.currentGainPct >= 0 ? '+' : ''}${p.currentGainPct.toFixed(1)}%** (Peak: +${p.highestGainPct.toFixed(1)}%)`).join('\n');
+                await interaction.editReply(`**Active Tracked Positions:**\n${list}`);
             }
         } catch (error: any) {
-            logger.error(`Error executing command /${commandName}:`, { message: error.message });
+            logger.error(`Error executing /${commandName}: ${error.message}`);
             if (interaction.deferred) {
-                await interaction.editReply(`⚠️ Error executing command: ${error.message}`);
+                await interaction.editReply(`Error executing command: ${error.message}`);
             } else if (!interaction.replied) {
-                await interaction.reply({ content: `⚠️ Error: ${error.message}`, ephemeral: true });
+                await interaction.reply({ content: `Error: ${error.message}`, ephemeral: true });
+            }
+        }
+    }
+
+    /**
+     * Handle button clicks on alert embeds
+     */
+    private async handleButtonInteraction(interaction: ButtonInteraction) {
+        const { customId } = interaction;
+
+        try {
+            if (customId.startsWith('track_')) {
+                const parts = customId.split('_');
+                const address = parts[1];
+                const symbol = parts[2] || 'TOKEN';
+
+                const pair = await DexScreenerService.getPairByAddress(address);
+                const currentPrice = pair ? parseFloat(pair.priceUsd) : 0;
+
+                await GainTrackerService.addPosition(symbol, pair?.chainId || 'solana', address, currentPrice, 15.0);
+                await interaction.reply({ content: `Started tracking **${symbol}** with 15% trailing stop at entry $${currentPrice}.`, ephemeral: true });
+
+            } else if (customId.startsWith('swap_')) {
+                const parts = customId.split('_');
+                const mint = parts[1];
+                const symbol = parts[2] || 'TOKEN';
+
+                await interaction.deferReply({ ephemeral: true });
+                const sim = await JupiterService.simulateSwap(mint, 0.1);
+
+                if (sim.success) {
+                    await interaction.editReply(`**Swap Simulation for ${symbol}**\n${sim.summary}\nPrice Impact: ${sim.priceImpactPct.toFixed(2)}%`);
+                } else {
+                    await interaction.editReply(`Simulation unavailable for ${symbol}: ${sim.summary}`);
+                }
+            }
+        } catch (error: any) {
+            logger.error(`Button interaction error: ${error.message}`);
+            if (!interaction.replied) {
+                await interaction.reply({ content: `Action failed: ${error.message}`, ephemeral: true });
             }
         }
     }
@@ -205,7 +339,7 @@ export class DiscordBotService {
         if (this.isRadarRunning) return;
         this.isRadarRunning = true;
 
-        logger.info(`🛰️ Starting Automated DexScreener Radar (Polling every ${env.POLL_INTERVAL_MS / 1000}s)...`);
+        logger.info(`Starting Automated DexScreener Radar (Interval: ${env.POLL_INTERVAL_MS / 1000}s)...`);
 
         setInterval(async () => {
             try {
@@ -252,15 +386,22 @@ export class DiscordBotService {
                         isWinner: aiReport.isWinner
                     });
 
-                    // 5. Notify Discord if verified gem candidate
+                    // 5. Generate and attach vector embedding
+                    VectorService.attachEmbedding(
+                        pair.pairAddress,
+                        `${pair.baseToken.name} (${pair.baseToken.symbol}) ${pair.chainId} ${aiReport.summary}`
+                    ).catch(() => {});
+
+                    // 6. Notify Discord if verified gem candidate
                     if (aiReport.score >= 80 && !aiReport.isScam) {
                         const channelId = env.DISCORD_ALERT_CHANNEL_ID;
                         if (channelId) {
                             const channel = this.client.channels.cache.get(channelId) as TextChannel;
                             if (channel) {
                                 const embed = DiscordEmbedFactory.createTokenEmbed(pair, security, aiReport);
-                                await channel.send({ embeds: [embed] });
-                                logger.info(`📢 Gem Alert Sent for ${pair.baseToken.symbol}!`);
+                                const actionRow = DiscordEmbedFactory.createTokenActionRow(pair);
+                                await channel.send({ embeds: [embed], components: [actionRow] });
+                                logger.info(`Gem Alert Sent for ${pair.baseToken.symbol}`);
                             }
                         }
                     }
@@ -291,7 +432,7 @@ export class DiscordBotService {
             } catch (error: any) {
                 logger.error(`Gain Tracker error: ${error.message}`);
             }
-        }, 60000); // Check every minute
+        }, 60000);
     }
 
     start() {
