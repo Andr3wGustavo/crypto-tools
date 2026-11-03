@@ -33,7 +33,8 @@ export class BinanceWebSocketService {
     private connect() {
         if (!this.isRunning) return;
 
-        const streamUrl = `${env.BINANCE_WS_URL}/${this.symbol}@bookTicker`;
+        const wsBase = env.BINANCE_TESTNET ? env.BINANCE_TESTNET_WS_URL : env.BINANCE_WS_URL;
+        const streamUrl = `${wsBase}/${this.symbol}@bookTicker`;
         this.ws = new WebSocket(streamUrl);
 
         this.ws.on('open', () => {

@@ -115,3 +115,16 @@ model MacroMetric {
   ethGasGwei             Float?
   timestamp              DateTime @default(now())
 }
+
+// ==========================================
+// 5. COMPOUND CAPITAL STATE (AUTOTRADE)
+// ==========================================
+model CapitalState {
+  id             String   @id @default("singleton")
+  baseCapital    Float    @default(100)
+  currentCapital Float    @default(100)
+  peakCapital    Float    @default(100)
+  reinvested     Float    @default(0)
+  protected_     Float    @default(0)
+  updatedAt      DateTime @updatedAt
+}

@@ -21,14 +21,17 @@ import { GainTrackerService } from '../tracker/gain-tracker.service';
 import { JupiterService } from '../dex-trader/jupiter.service';
 import { DiscordEmbedFactory } from './embeds';
 import { MarketMakerEngine } from '../trading/market-maker.engine';
+import { CompoundService } from '../trading/compound.service';
 
 export class DiscordBotService {
     private client: Client;
     private mmEngine: MarketMakerEngine;
+    private compoundService: CompoundService;
     private isRadarRunning = false;
 
-    constructor(mmEngine: MarketMakerEngine) {
+    constructor(mmEngine: MarketMakerEngine, compoundService: CompoundService) {
         this.mmEngine = mmEngine;
+        this.compoundService = compoundService;
         this.client = new Client({
             intents: [
                 GatewayIntentBits.Guilds,
@@ -134,7 +137,10 @@ export class DiscordBotService {
                 ),
             new SlashCommandBuilder()
                 .setName('gains')
-                .setDescription('Display actively tracked positions and trailing stop levels')
+                .setDescription('Display actively tracked positions and trailing stop levels'),
+            new SlashCommandBuilder()
+                .setName('compound')
+                .setDescription('Display compound capital stats and edge estimation')
         ];
 
         try {
@@ -268,7 +274,7 @@ export class DiscordBotService {
                     await interaction.reply('Stopped Binance Market Maker Engine.');
                 } else {
                     const status = this.mmEngine.getStatus();
-                    await interaction.reply(`**Binance MM Status [${status.symbol}]**\n- Active: **${status.isRunning ? 'YES' : 'NO'}**\n- Cycles Completed: **${status.cycleCount}**\n- Current Mid: **$${status.lastMidPrice.toFixed(2)}**\n- Depth Imbalance: **${(status.lastImbalance * 100).toFixed(2)}%**\n- Volatility (Respiro): **${(status.volatilityRespiro * 100).toFixed(4)}%**`);
+                    await interaction.reply(`**Binance MM Status [${status.symbol}]**\n- Active: **${status.isRunning ? 'YES' : 'NO'}**\n- Cycles Completed: **${status.cycleCount}**\n- Current Mid: **$${status.lastMidPrice.toFixed(2)}**\n- Depth Imbalance: **${(status.lastImbalance * 100).toFixed(2)}%**\n- Volatility (Respiro): **${(status.volatilityRespiro * 100).toFixed(4)}%**\n- Sigma Realized: **${(status.sigmaRealized * 100).toFixed(4)}%**\n- Order Size: **$${status.currentOrderSize.toFixed(2)}**\n- Edge: **${status.edgeProb !== undefined ? (status.edgeProb * 100).toFixed(1) + '%' : 'N/A'}**\n- Should Trade: **${status.shouldTrade}**`);
                 }
 
             } else if (commandName === 'gains') {
@@ -281,6 +287,25 @@ export class DiscordBotService {
 
                 const list = positions.map(p => `- **${p.symbol}** (${p.chain}): Entry $${p.entryPrice} | Current $${p.currentPrice} | PnL: **${p.currentGainPct >= 0 ? '+' : ''}${p.currentGainPct.toFixed(1)}%** (Peak: +${p.highestGainPct.toFixed(1)}%)`).join('\n');
                 await interaction.editReply(`**Active Tracked Positions:**\n${list}`);
+            } else if (commandName === 'compound') {
+                await interaction.deferReply();
+                const stats = this.compoundService.getStats();
+                const edge = this.mmEngine.getEdgeSummary();
+                const status = this.mmEngine.getStatus();
+                await interaction.editReply(
+                    `**Compound Capital Stats:**\n` +
+                    `- Base Capital: $${stats.baseCapital.toFixed(2)}\n` +
+                    `- Current Capital: $${stats.currentCapital.toFixed(2)}\n` +
+                    `- Total Profit: $${stats.totalProfitUsd.toFixed(4)} (${stats.growthPct.toFixed(2)}%)\n` +
+                    `- Peak Capital: $${stats.peakCapital.toFixed(2)}\n` +
+                    `- Drawdown: ${stats.drawdownPct.toFixed(2)}%\n` +
+                    `- Reinvested: $${stats.reinvested.toFixed(4)}\n` +
+                    `- Protected Reserve: $${stats.protectedReserve.toFixed(4)}\n` +
+                    `- Halted: ${stats.halted ? 'YES' : 'NO'}\n` +
+                    `- Order Size: $${status.currentOrderSize.toFixed(2)}\n` +
+                    `- Edge: ${edge}\n` +
+                    `- Should Trade: ${status.shouldTrade}`
+                );
             }
         } catch (error: any) {
             logger.error(`Error executing /${commandName}: ${error.message}`);

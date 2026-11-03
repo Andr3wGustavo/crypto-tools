@@ -1,6 +1,7 @@
 import BigNumber from 'bignumber.js';
 import axios from 'axios';
 import { logger } from '../../utils/logger';
+import { env } from '../../config/env';
 
 export interface SymbolFilterRules {
     tickSize: string;
@@ -17,7 +18,7 @@ export class ExchangeInfoService {
     /**
      * Fetch exact symbol filters from Binance exchangeInfo
      */
-    static async getSymbolFilters(symbol: string, baseUrl = 'https://api.binance.com'): Promise<SymbolFilterRules> {
+    static async getSymbolFilters(symbol: string, baseUrl = env.BINANCE_TESTNET ? env.BINANCE_TESTNET_BASE_URL : 'https://api.binance.com'): Promise<SymbolFilterRules> {
         const cached = this.cache.get(symbol);
         if (cached) return cached;
 

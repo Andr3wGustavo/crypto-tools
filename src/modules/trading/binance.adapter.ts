@@ -8,7 +8,7 @@ export class BinanceAdapter {
     private secret: string;
     private baseUrl: string;
 
-    constructor(apiKey = env.BINANCE_API_KEY, secret = env.BINANCE_SECRET, baseUrl = env.BINANCE_BASE_URL) {
+    constructor(apiKey = env.BINANCE_API_KEY, secret = env.BINANCE_SECRET, baseUrl = env.BINANCE_TESTNET ? env.BINANCE_TESTNET_BASE_URL : env.BINANCE_BASE_URL) {
         this.apiKey = apiKey;
         this.secret = secret;
         this.baseUrl = baseUrl;
