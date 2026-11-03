@@ -6,6 +6,7 @@ import { BinanceUserDataStreamService } from './modules/trading/binance-user-str
 import { DiscordBotService } from './modules/discord/bot';
 import { ReconcilerService } from './modules/trading/reconciler.service';
 import { BinanceAdapter } from './modules/trading/binance.adapter';
+import { AutoWithdrawService } from './modules/trading/auto-withdraw.service';
 
 async function bootstrap() {
     console.log(`
@@ -23,13 +24,18 @@ async function bootstrap() {
     logger.info(`Starting Cortex Crypto in [${env.NODE_ENV}] mode...`);
     logger.info(`Binance Testnet: ${env.BINANCE_TESTNET}`);
 
-    // 1. Initialize Compound Service
+    // 0. Initialize Auto-Withdraw Service (profit skimming)
+    const autoWithdraw = new AutoWithdrawService();
+
+    // 1. Initialize Compound Service (with auto-withdraw)
     const compoundService = new CompoundService(
         env.MM_CAPITAL_BASE,
         env.MM_REINVESTMENT_RATIO,
         env.MM_MAX_ORDER_USD,
         env.MM_DRAWDOWN_LIMIT,
-        env.MM_ORDER_CAPITAL_FRACTION
+        env.MM_ORDER_CAPITAL_FRACTION,
+        autoWithdraw,
+        env.WITHDRAW_DESTINATION
     );
     await compoundService.init();
 
@@ -66,6 +72,12 @@ async function bootstrap() {
     } else {
         logger.warn('DISCORD_TOKEN not configured. Running in headless terminal mode.');
     }
+
+    // 6.5 Heartbeat (AFK monitoring)
+    setInterval(() => {
+        const stats = compoundService.getStats();
+        logger.info(`[Heartbeat] alive | capital=$${stats.currentCapital.toFixed(2)} | profit=$${stats.totalProfitUsd.toFixed(4)} | drawdown=${stats.drawdownPct.toFixed(2)}% | halted=${stats.halted} | edge=${mmEngine.getEdgeSummary()}`);
+    }, 60000);
 
     // 7. Graceful Shutdown Handlers
     const shutdown = () => {

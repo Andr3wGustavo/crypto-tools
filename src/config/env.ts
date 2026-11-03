@@ -52,6 +52,18 @@ const envSchema = z.object({
     MM_MAX_ORDER_USD: z.coerce.number().default(200.0),
     MM_DRAWDOWN_LIMIT: z.coerce.number().default(0.15),
     MM_ORDER_CAPITAL_FRACTION: z.coerce.number().default(0.2),
+
+    // Solana DEX
+    SOLANA_RPC_URL: z.string().default('https://api.mainnet-beta.solana.com'),
+    SOLANA_PRIVATE_KEY: z.string().optional().default(''),
+    DEX_AUTO_BUY_ENABLED: z.coerce.boolean().default(false),
+    DEX_AUTO_BUY_AMOUNT_SOL: z.coerce.number().default(0.1),
+    DEX_MIN_AI_SCORE: z.coerce.number().default(90),
+
+    // Auto-Withdraw (profit skimming)
+    WITHDRAW_THRESHOLD: z.coerce.number().default(0.5),
+    WITHDRAW_DESTINATION: z.string().optional().default(''),
+    WITHDRAW_ASSET: z.string().default('USDT'),
 });
 
 const parseEnv = () => {

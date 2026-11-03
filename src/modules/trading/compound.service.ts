@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { env } from '../../config/env';
 import { logger } from '../../utils/logger';
+import { AutoWithdrawService, WithdrawResult } from './auto-withdraw.service';
 
 const prisma = new PrismaClient();
 
@@ -25,13 +26,19 @@ export class CompoundService {
     private reinvested: number = 0;
     private protectedReserve: number = 0;
     private halted: boolean = false;
+    private autoWithdraw: AutoWithdrawService | null = null;
+    private withdrawDestination: string = '';
+    private withdrawAsset: string = env.WITHDRAW_ASSET;
+    private withdrawThreshold: number = env.WITHDRAW_THRESHOLD;
 
     constructor(
         initialCapital = env.MM_CAPITAL_BASE,
         reinvestmentRatio = env.MM_REINVESTMENT_RATIO,
         maxOrderSizeUsd = env.MM_MAX_ORDER_USD,
         drawdownLimit = env.MM_DRAWDOWN_LIMIT,
-        orderCapitalFraction = env.MM_ORDER_CAPITAL_FRACTION
+        orderCapitalFraction = env.MM_ORDER_CAPITAL_FRACTION,
+        autoWithdraw: AutoWithdrawService | null = null,
+        withdrawDestination = env.WITHDRAW_DESTINATION
     ) {
         this.baseCapital = initialCapital;
         this.currentCapital = initialCapital;
@@ -40,6 +47,8 @@ export class CompoundService {
         this.maxOrderSizeUsd = maxOrderSizeUsd;
         this.drawdownLimit = drawdownLimit;
         this.orderCapitalFraction = orderCapitalFraction;
+        this.autoWithdraw = autoWithdraw;
+        this.withdrawDestination = withdrawDestination;
     }
 
     async init(): Promise<void> {
@@ -98,6 +107,23 @@ export class CompoundService {
 
             this.reinvested += reinvestedPortion;
             this.protectedReserve += protectedPortion;
+
+            // Auto-skim: if protected reserve >= threshold, withdraw profit to wallet
+            if (this.protectedReserve >= this.withdrawThreshold && this.autoWithdraw && this.withdrawDestination) {
+                const skimAmount = this.protectedReserve;
+                logger.info(`[Compound] Skim trigger: reserve $${skimAmount.toFixed(4)} >= threshold $${this.withdrawThreshold.toFixed(2)}. Withdrawing...`);
+                this.autoWithdraw.withdraw(skimAmount, this.withdrawAsset, this.withdrawDestination).then((result: WithdrawResult) => {
+                    if (result.success) {
+                        logger.info(`[Compound] Skim successful: ${result.amount} ${result.asset} -> ${result.destination} tx=${result.txId}`);
+                        this.protectedReserve = 0;
+                        this.persist().catch(() => {});
+                    } else {
+                        logger.error(`[Compound] Skim failed: ${result.error}`);
+                    }
+                }).catch((err: any) => {
+                    logger.error(`[Compound] Skim error: ${err.message}`);
+                });
+            }
 
             const addedOrderAllocation = this.reinvested * 0.1;
             newOrderSize = currentOrderSize + addedOrderAllocation;
