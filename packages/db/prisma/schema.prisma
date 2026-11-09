@@ -1,0 +1,376 @@
+// Cortex Farm — Postgres 16 + TimescaleDB.
+// One database per trading mode (farm_shadow, farm_live) with this same schema,
+// so simulated and real ledgers can never mix. Hypertables / retention are created
+// in the migration SQL (see migrations/*/migration.sql), not by Prisma.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TradingMode {
+  shadow
+  live
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderStatus {
+  INTENT
+  SENT
+  NEW
+  PARTIAL
+  FILLED
+  CANCEL_REQ
+  CANCELED
+  REJECTED
+  EXPIRED
+  UNKNOWN
+}
+
+enum RiskSeverity {
+  info
+  reduce_only
+  pause
+  halt
+  kill
+}
+
+enum WithdrawalStatus {
+  PENDING
+  SENT
+  CONFIRMED
+  FAILED
+}
+
+// ==========================================================================
+// 1. BOTS & VERSIONED CONFIG
+// ==========================================================================
+
+model Bot {
+  id        String      @id // e.g. "mexc:SOLUSDT"
+  venue     String
+  symbol    String
+  mode      TradingMode
+  status    String      @default("stopped") // stopped | running | paused | halted | killed
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+  configs   BotConfig[]
+}
+
+/// Pre-registered, versioned parameters. A change is a new row (never an update).
+model BotConfig {
+  id          String   @id @default(uuid())
+  botId       String
+  version     Int
+  params      Json
+  effectiveAt DateTime @default(now()) @db.Timestamptz(3)
+  createdBy   String
+  note        String?
+  bot         Bot      @relation(fields: [botId], references: [id])
+
+  @@unique([botId, version])
+}
+
+// ==========================================================================
+// 2. APPEND-ONLY EVENT LOG (hypertable on ts)
+// ==========================================================================
+
+model Event {
+  id      BigInt      @default(autoincrement())
+  ts      DateTime    @db.Timestamptz(3)
+  mode    TradingMode
+  botId   String?
+  type    String
+  version Int         @default(1)
+  payload Json
+
+  @@id([id, ts])
+  @@index([botId, ts])
+  @@index([type, ts])
+  @@map("events")
+}
+
+// ==========================================================================
+// 3. ORDERS & FILLS
+// ==========================================================================
+
+model Order {
+  clientOrderId   String      @id
+  botId           String
+  mode            TradingMode
+  venue           String
+  symbol          String
+  side            OrderSide
+  price           Decimal     @db.Decimal(38, 18)
+  quantity        Decimal     @db.Decimal(38, 18)
+  filledQty       Decimal     @default(0) @db.Decimal(38, 18)
+  status          OrderStatus
+  exchangeOrderId String?
+  reason          String?
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+  fills           Fill[]
+
+  @@index([botId, status])
+  @@index([botId, createdAt])
+}
+
+model Fill {
+  id            String      @id // venue trade id, or deterministic sim id
+  clientOrderId String
+  botId         String
+  mode          TradingMode
+  side          OrderSide
+  price         Decimal     @db.Decimal(38, 18)
+  quantity      Decimal     @db.Decimal(38, 18)
+  quoteQty      Decimal     @db.Decimal(38, 18)
+  fee           Decimal     @db.Decimal(38, 18)
+  feeAsset      String
+  isMaker       Boolean
+  ts            DateTime    @db.Timestamptz(3)
+  order         Order       @relation(fields: [clientOrderId], references: [clientOrderId])
+
+  @@index([botId, ts])
+}
+
+// ==========================================================================
+// 4. DOUBLE-ENTRY LEDGER (cash, treasury, trading/conversion, fees, equity)
+//    Invariant: for every tx and every asset, SUM(amount) = 0.
+// ==========================================================================
+
+model LedgerTx {
+  id      String        @id
+  ts      DateTime      @db.Timestamptz(3)
+  mode    TradingMode
+  botId   String
+  kind    String // deposit | fill | fee | treasury_split | treasury_promotion | withdrawal | adjustment
+  ref     String?
+  memo    String?
+  entries LedgerEntry[]
+
+  @@index([botId, ts])
+  @@index([kind, ts])
+}
+
+model LedgerEntry {
+  id      BigInt   @id @default(autoincrement())
+  txId    String
+  account String // cash:USDT | cash:SOL | treasury:USDT | trading:USDT | expense:fees:USDT | equity:capital:USDT | external:USDT
+  asset   String
+  amount  Decimal  @db.Decimal(38, 18) // signed
+  tx      LedgerTx @relation(fields: [txId], references: [id])
+
+  @@index([account])
+  @@index([txId])
+}
+
+// ==========================================================================
+// 5. TIME SERIES FOR THE DASHBOARD (hypertables)
+// ==========================================================================
+
+model EquitySnapshot {
+  botId          String
+  mode           TradingMode
+  ts             DateTime    @db.Timestamptz(3)
+  equity         Float
+  cash           Float
+  treasury       Float
+  inventoryQty   Float
+  inventoryValue Float
+  realizedPnl    Float
+  unrealizedPnl  Float
+  fees           Float
+  mid            Float
+
+  @@id([botId, ts])
+  @@map("equity_snapshots")
+}
+
+model QuoteSample {
+  botId         String
+  ts            DateTime @db.Timestamptz(3)
+  fair          Float
+  bid           Float?
+  ask           Float?
+  halfSpreadBps Float
+  skewBps       Float
+  sigmaBps      Float
+  toxic         Boolean
+
+  @@id([botId, ts])
+  @@map("quote_samples")
+}
+
+model Markout {
+  fillId    String
+  horizonMs Int
+  botId     String
+  ts        DateTime @db.Timestamptz(3)
+  bps       Float
+
+  @@id([fillId, horizonMs])
+  @@index([botId, ts])
+}
+
+model LogEntry {
+  id      BigInt   @default(autoincrement())
+  ts      DateTime @db.Timestamptz(3)
+  level   String
+  service String
+  botId   String?
+  msg     String
+  data    Json?
+
+  @@id([id, ts])
+  @@index([service, ts])
+  @@map("log_entries")
+}
+
+// ==========================================================================
+// 6. EDGE, RISK, CAPITAL LADDER, WITHDRAWALS, AUDIT
+// ==========================================================================
+
+/// Persisted Normal-Inverse-Gamma sufficient statistics (Welford form).
+model EdgeState {
+  botId     String      @id
+  mode      TradingMode
+  n         Int
+  mean      Float
+  m2        Float
+  prior     Json
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+}
+
+model RiskEvent {
+  id         String       @id @default(uuid())
+  botId      String?
+  ts         DateTime     @default(now()) @db.Timestamptz(3)
+  severity   RiskSeverity
+  rule       String
+  message    String
+  data       Json?
+  resolvedAt DateTime?    @db.Timestamptz(3)
+
+  @@index([botId, ts])
+}
+
+model CapitalStage {
+  botId       String   @id
+  stage       Int // 0 = D0 shadow, 1 = D1 $15, 2 = D2 $50, 3 = D3 $200+
+  startedAt   DateTime @default(now()) @db.Timestamptz(3)
+  startEquity Float
+  note        String?
+}
+
+model Withdrawal {
+  id         String           @id // deterministic idempotency key
+  botId      String
+  status     WithdrawalStatus
+  asset      String
+  network    String
+  address    String
+  amount     Decimal          @db.Decimal(38, 18)
+  fee        Decimal?         @db.Decimal(38, 18)
+  exchangeId String?
+  txHash     String?
+  error      String?
+  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime         @updatedAt @db.Timestamptz(3)
+
+  @@index([botId, createdAt])
+}
+
+model AuditLog {
+  id     String   @id @default(uuid())
+  ts     DateTime @default(now()) @db.Timestamptz(3)
+  actor  String // wallet address or service name
+  action String
+  target String?
+  data   Json?
+  ip     String?
+
+  @@index([ts])
+}
+
+// ==========================================================================
+// 7. LEGACY SCOUT MODELS (apps/sentinel) — unchanged shape
+// ==========================================================================
+
+model Token {
+  id              String     @id @default(uuid())
+  address         String     @unique
+  name            String
+  symbol          String
+  chainId         String
+  dexId           String
+  url             String
+  imageUrl        String?
+  liquidity       Float
+  fdv             Float
+  price           Float
+  priceNative     String?
+  volume24h       Float      @default(0)
+  priceChange24h  Float      @default(0)
+  pairCreatedAt   DateTime?
+  discoveredAt    DateTime   @default(now())
+  isHoneypot      Boolean    @default(false)
+  buyTax          Float      @default(0)
+  sellTax         Float      @default(0)
+  isMintable      Boolean    @default(false)
+  hasBlacklist    Boolean    @default(false)
+  liquidityLocked Boolean    @default(false)
+  securityReport  String?
+  riskScore       Int?
+  aiAnalysis      String?
+  isScam          Boolean    @default(false)
+  isWinner        Boolean    @default(false)
+  embedding       String?
+  tags            String?
+  logs            TokenLog[]
+  positions       Position[]
+}
+
+model TokenLog {
+  id        String   @id @default(uuid())
+  tokenId   String
+  token     Token    @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  message   String
+  level     String
+  timestamp DateTime @default(now())
+}
+
+model Position {
+  id              String   @id @default(uuid())
+  tokenId         String?
+  token           Token?   @relation(fields: [tokenId], references: [id])
+  symbol          String
+  chain           String
+  tokenAddress    String
+  entryPrice      Float
+  currentPrice    Float
+  peakPrice       Float
+  currentGainPct  Float    @default(0)
+  highestGainPct  Float    @default(0)
+  trailingStopPct Float    @default(15.0)
+  status          String   @default("ACTIVE")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model MacroMetric {
+  id                    String   @id @default(uuid())
+  fearAndGreedIndex     Int
+  fearAndGreedSentiment String
+  btcDominance          Float?
+  ethGasGwei            Float?
+  timestamp             DateTime @default(now())
+}

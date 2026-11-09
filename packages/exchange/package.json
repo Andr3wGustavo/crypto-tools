@@ -1,0 +1,16 @@
+{
+  "name": "@cortex/exchange",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Exchange adapters: MEXC (REST v3 + protobuf WS) and Binance (market data).",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@cortex/core": "*",
+    "protobufjs": "^7.4.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
+  }
+}

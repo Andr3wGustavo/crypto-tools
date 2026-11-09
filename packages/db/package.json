@@ -1,0 +1,11 @@
+{
+  "name": "@cortex/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prisma schema (Postgres + TimescaleDB) and the single shared PrismaClient.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@prisma/client": "5.22.0"
+  }
+}

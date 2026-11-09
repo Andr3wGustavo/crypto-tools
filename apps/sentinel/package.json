@@ -1,0 +1,15 @@
+{
+  "name": "@cortex/sentinel",
+  "version": "2.1.0",
+  "private": true,
+  "description": "Legacy DEX scout + AI due diligence + Discord terminal (to be refit onto the API).",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@cortex/db": "*",
+    "axios": "^1.7.9",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "winston": "^3.11.0",
+    "zod": "^3.23.8"
+  }
+}

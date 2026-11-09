@@ -1,0 +1,11 @@
+{
+  "name": "@cortex/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure, deterministic trading math, accounting and strategy. No I/O.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "bignumber.js": "^9.1.2"
+  }
+}
