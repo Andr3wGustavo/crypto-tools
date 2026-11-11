@@ -18,3 +18,4 @@ export * from './sim/sim-executor';
 export * from './strategy/types';
 export * from './strategy/mm-strategy';
 export * from './testing/synthetic-market';
+export * from './state/codec';
