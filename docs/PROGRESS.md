@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **40 / 100** (E2 proven; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **50 / 100** (E2 and E3 proven; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -32,9 +32,19 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
 - ✅ Same hour replayed with the queue-cap fix: 4 fills instead of 1 → the old queue model under-counted fills ~4× (pessimistic and toxic-biased). 85/85 tests green.
 
 ## E3 — Accounting, treasury, risk → 52
-- ✅ (core) double-entry ledger, average-cost PnL, treasury + capital ladder, risk manager (kill/halt/pause/reduce-only) with tests — `e077537`
-- ⬜ Boot restore (snapshot + tail replay; also restores the clientOrderId `seq`, required before live), drain on shutdown, kill/restart with equity matching
-- ⬜ Continuous reconciliation (live), persisted state
+- ✅ (core) double-entry ledger, average-cost PnL, treasury + capital ladder, risk manager (kill/halt/pause/reduce-only) with tests — `e077537`; ledger and treasury property tests, one test per risk rule
+- ✅ Exact state codec (`packages/core/src/state/codec.ts`): ±Infinity, NaN, -0, `undefined`, Map, Set round-trip bit-exactly; refuses shapes it cannot restore (functions, nested class instances, missing/unknown fields). Mutation-tested: dropping the simulator from the restore makes 3 tests fail
+- ✅ Engine snapshot/restore: `ShadowEngine.snapshot()/restore()`; config-hash identity of the experiment; every ledger transaction re-validated on restore; restore at any cut point = uninterrupted run (outputs hash and full-state digest). The clientOrderId `seq` survives restarts (no duplicate ids — required before live)
+- ✅ Boot restore (`apps/worker/src/state/boot.ts`): newest valid snapshot + replay of the recorded tail; the cursor (file, line, sha256 of the record) must exist on disk, otherwise the snapshot is quarantined and an older one (or genesis) is used. Snapshots are atomic (tmp → fsync → rename), every 60 s and on shutdown; one run directory per configuration (`cfg-<hash12>`)
+- ✅ Recorder: file order = record order across restarts even if the wall clock steps back (floor key + monotonic segment)
+- ✅ Process health is a recorded input (`health` every 5 s: event-loop lag p99, data-feed errors/min, MEXC clock offset) → the risk rules for lag/error rate/clock skew are now live and replayable; operator commands are recorded inputs too
+- ✅ Continuous reconciliation (shadow): exact ledger vs strategy balances after every fill; divergence ⇒ sticky risk halt + `reconcile` event (persisted)
+- ✅ Drain on shutdown (stop inputs → close recording → final snapshot → sinks) with a 15 s hard exit; fail-closed on engine exceptions, `uncaughtException` and `unhandledRejection` (a partial state is never snapshotted)
+- ✅ Fixed: an exception thrown by the trading loop inside a WebSocket handler was swallowed as a "decode error" (MEXC and Binance streams) — handler errors now propagate and fail closed
+- ✅ Fixed: MEXC clock sync used one sample that included the TLS handshake (offset 500–750 ms, RTT ≤ 937 ms); now min-RTT of 5 samples → offset ≈ 52 ms, RTT ≈ 300 ms. Without this the clock-skew rule would have paused the shadow for nothing
+- ✅ Fixed: Redis sink kept reconnecting and logging forever after a failed init; errors are now throttled to 1 log/min
+- ✅ **E3 proof — live kill -9 / restart, state bit-exact** (2026-11-11, MEXC SOLUSDT + Binance, bundled worker): process 1 ran 3.5 min, snapshots every 45 s, killed with `taskkill /F` 22 s after the last snapshot → process 2 restored `snap-…9889` + replayed the 2 090-record tail in 436 ms → state digest `a0b113fc…` = an independent genesis replay of the crashed segment (11 979 records) → ran 3 min live, drained → final digest `9d48738f1de5e5b8…` = full genesis replay of both segments (24 764 records, 82 places, 81 cancels) → a third boot restored with 0 records to replay. Equity matched (15 → 15; no fills in this window — 1-tick spread — so the fill path of the restart proof is covered by the synthetic kill/restart test, which has fills)
+- ⬜ Live reconciliation against the exchange (balances/open orders) — belongs to the live executor (E8)
 
 ## Findings to act on
 - MEXC SOLUSDT on 2026-11-11 (1 h, 5 679 trades): spread **1 tick = 1.19 bps** (p10 = p50 = p90), not the 12.5 bps of the 11-09 snapshot. Empirical P(touch within 30 s): 35/39 % at 1 bp, 18/17 % at 3 bps, 13/15 % at 5 bps, 2/7 % at 8 bps → fitted k ≈ 0.35–0.45 /bp, consistent with the configured k = 0.4, so the quoting math is coherent; the market itself (1-tick spread, deep queue) yields ~1–4 fills/h, i.e. ~300 fills would take days on one pair. **Decision:** no by-eye re-tuning of the pre-registered parameters (that would be p-hacking the GO gate); E4 shadow runs 5–10 pairs chosen by measured spread-in-ticks / touch rate / k (scanner logic pulled forward from E7).
