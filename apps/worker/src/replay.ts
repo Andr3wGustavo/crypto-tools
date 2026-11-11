@@ -39,7 +39,7 @@ export async function replay(files: string[], meta: { config: StrategyConfig; st
     if (o.kind === 'action' && o.action.kind === 'cancel') cancels++;
     if (o.kind === 'edge') edgeWindows++;
   };
-  for await (const r of readNdjsonGz(files)) {
+  for await (const r of readNdjsonGz(files, (f, d) => console.warn(`[replay] ${f}: ${d}`))) {
     records++;
     engine.process(r).forEach(count);
   }
