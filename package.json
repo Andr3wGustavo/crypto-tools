@@ -23,11 +23,14 @@
     "infra:up": "docker compose -f infra/compose.yaml up -d",
     "infra:down": "docker compose -f infra/compose.yaml down",
     "worker:dev": "tsx watch apps/worker/src/main.ts",
-    "sentinel:dev": "tsx watch apps/sentinel/src/index.ts"
+    "sentinel:dev": "tsx watch apps/sentinel/src/index.ts",
+    "build:worker": "node scripts/build-worker.mjs",
+    "docker:worker": "docker build -f infra/docker/worker.Dockerfile -t cortex-worker:dev ."
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^3.2.4",
+    "esbuild": "^0.28.2",
     "fast-check": "^3.23.2",
     "prisma": "5.22.0",
     "tsx": "^4.19.2",

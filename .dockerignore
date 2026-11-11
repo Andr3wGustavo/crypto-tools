@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/coverage
+data
+logs
+archive
+docs
+.git
+.github
+.env
+.env.*
+!.env.example
+*.log
+*.ndjson*

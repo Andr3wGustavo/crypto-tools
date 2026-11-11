@@ -30,7 +30,8 @@ export interface MexcPush {
   publicAggreDeals?: { deals: MexcAggreDeal[] };
 }
 
-export const MEXC_PROTO_DIR = path.resolve(__dirname, '../../proto/mexc');
+/** Overridable for bundled builds (the Docker image ships the protos at a fixed path). */
+export const MEXC_PROTO_DIR = process.env.MEXC_PROTO_DIR ?? path.resolve(__dirname, '../../proto/mexc');
 
 let wrapperType: protobuf.Type | undefined;
 
