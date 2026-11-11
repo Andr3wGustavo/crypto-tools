@@ -64,6 +64,15 @@ export class SimExecutor {
   onBook(ts: number, book: BookTop): SimEvent[] {
     const out = this.advance(ts);
     this.book = book;
+    // Hard bound, not an assumption: everyone ahead of us at our level is displayed at that level,
+    // so the queue ahead can never exceed the displayed size there. Without this cap an order that
+    // lost its place to cancellations could only fill on trade-throughs, which over-samples the most
+    // toxic fills and distorts the measured adverse selection.
+    for (const o of this.orders.values()) {
+      if (!o.active) continue;
+      const displayed = o.side === 'BUY' ? (o.price === book.bid ? book.bidQty : undefined) : (o.price === book.ask ? book.askQty : undefined);
+      if (displayed !== undefined && displayed < o.queueAhead) o.queueAhead = displayed;
+    }
     return out;
   }
 

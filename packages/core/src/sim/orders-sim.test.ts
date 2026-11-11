@@ -32,6 +32,26 @@ describe('order FSM', () => {
 describe('SimExecutor (conservative shadow fills)', () => {
   const book = { bid: 99.9, bidQty: 5, ask: 100.1, askQty: 5 };
 
+  it('queue ahead is capped by the displayed size at our level, and never grows', () => {
+    const s = new SimExecutor({ latencyMs: 0, makerFeeRate: 0 });
+    s.onBook(0, { bid: 99.9, bidQty: 100, ask: 100.1, askQty: 5 });
+    s.place(0, { clientOrderId: 'q', side: 'BUY', price: 99.9, qty: 2 }); // joins behind 100
+    s.onBook(1, { bid: 99.9, bidQty: 3, ask: 100.1, askQty: 5 }); // 97 cancelled ahead → ≤ 3 ahead
+    s.onBook(2, { bid: 99.9, bidQty: 50, ask: 100.1, askQty: 5 }); // newcomers queue BEHIND us
+    const fills = s.onTrade({ ts: 3, price: 99.9, qty: 4, aggressor: 'sell' });
+    expect(fills).toMatchObject([{ kind: 'fill', clientOrderId: 'q', qty: 1, price: 99.9 }]);
+  });
+
+  it('an order placed below the best gets a finite queue once the market comes down to it', () => {
+    const s = new SimExecutor({ latencyMs: 0, makerFeeRate: 0 });
+    s.onBook(0, book);
+    s.place(0, { clientOrderId: 'd', side: 'BUY', price: 99.8, qty: 1 }); // below best: infinite queue
+    expect(s.onTrade({ ts: 1, price: 99.8, qty: 10, aggressor: 'sell' }).filter((e) => e.kind === 'fill')).toEqual([]);
+    s.onBook(2, { bid: 99.8, bidQty: 2, ask: 99.9, askQty: 5 });
+    const fills = s.onTrade({ ts: 3, price: 99.8, qty: 3, aggressor: 'sell' });
+    expect(fills).toMatchObject([{ kind: 'fill', clientOrderId: 'd', qty: 1 }]);
+  });
+
   it('activates after latency and rejects orders that would cross', () => {
     const s = new SimExecutor({ latencyMs: 100, makerFeeRate: 0 });
     s.onBook(0, book);
