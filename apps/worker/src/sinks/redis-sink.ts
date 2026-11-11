@@ -13,17 +13,29 @@ export class RedisSink {
   private readonly r: Redis;
   errors = 0;
   private lastSnap = 0;
+  private lastErrLog = Number.NEGATIVE_INFINITY;
 
   constructor(url: string, private readonly botId: string, private readonly log: Logger) {
     this.r = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false });
     this.r.on('error', (e) => {
       this.errors++;
-      this.log.warn({ err: e.message }, 'redis error');
+      // ioredis retries forever while Redis is down: log at most once a minute, count every error.
+      const now = Date.now();
+      if (now - this.lastErrLog >= 60_000) {
+        this.lastErrLog = now;
+        this.log.warn({ err: e.message || e.name, errors: this.errors }, 'redis error (throttled)');
+      }
     });
   }
 
+  /** Connects; on failure the client is torn down so it stops reconnecting in the background. */
   async init(): Promise<void> {
-    await this.r.connect();
+    try {
+      await this.r.connect();
+    } catch (err) {
+      this.r.disconnect();
+      throw err;
+    }
   }
 
   push(outs: EngineOutput[], snapshot: () => unknown, now: number): void {

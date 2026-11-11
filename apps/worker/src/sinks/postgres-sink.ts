@@ -143,6 +143,8 @@ export class PostgresSink {
       } else if (o.kind === 'edge') {
         edge = o;
         ev(o.ts, 'edge.window', o);
+      } else if (o.kind === 'reconcile') {
+        ev(o.ts, 'reconcile.diverged', o);
       }
     }
 

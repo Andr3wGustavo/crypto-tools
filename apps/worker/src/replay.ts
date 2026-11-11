@@ -2,12 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { StrategyConfig } from '@cortex/core';
-import { ShadowEngine, type EngineOutput } from './engine/shadow-engine';
+import { ShadowEngine, stateDigest, type EngineOutput } from './engine/shadow-engine';
 import { listRecordings, readNdjsonGz } from './recorder/ndjson';
 
 /**
  * Deterministic replay of a recorded shadow session.
- *   npx tsx apps/worker/src/replay.ts data/market/mexc-SOLUSDT
+ *   npx tsx apps/worker/src/replay.ts data/market/mexc-SOLUSDT/cfg-<hash12>
  * Prints a summary and a SHA-256 of every engine output: two replays of the same recording
  * (or a replay vs the live run) must print the same hash.
  */
@@ -22,10 +22,30 @@ export interface ReplaySummary {
   pnl: number;
   edgeWindows: number;
   outputHash: string;
+  /** Digest of the final engine state: equals the live worker's `stateDigest` for the same records. */
+  stateDigest: string;
 }
 
-export async function replay(files: string[], meta: { config: StrategyConfig; startQuote: number; latencyMs: number; info: { makerFeeRate: number } }): Promise<ReplaySummary> {
-  const engine = new ShadowEngine({ config: meta.config, startQuote: meta.startQuote, latencyMs: meta.latencyMs, makerFeeRate: meta.info.makerFeeRate });
+export interface ReplayMeta {
+  config: StrategyConfig;
+  startQuote: number;
+  latencyMs: number;
+  info: { makerFeeRate: number };
+  timerMs?: number;
+  edgeWindowMs?: number;
+  /** Written by the worker since E3; checked when present. */
+  configHash?: string;
+}
+
+export async function replay(files: string[], meta: ReplayMeta): Promise<ReplaySummary> {
+  const engine = new ShadowEngine({
+    config: meta.config, startQuote: meta.startQuote, latencyMs: meta.latencyMs, makerFeeRate: meta.info.makerFeeRate,
+    ...(meta.timerMs !== undefined ? { timerMs: meta.timerMs } : {}),
+    ...(meta.edgeWindowMs !== undefined ? { edgeWindowMs: meta.edgeWindowMs } : {}),
+  });
+  if (meta.configHash && meta.configHash !== engine.configHash) {
+    throw new Error(`meta.json configHash ${meta.configHash.slice(0, 12)} ≠ engine ${engine.configHash.slice(0, 12)} (engine version or config changed)`);
+  }
   const hash = crypto.createHash('sha256');
   let records = 0;
   let outputs = 0;
@@ -48,14 +68,14 @@ export async function replay(files: string[], meta: { config: StrategyConfig; st
     records, outputs, fills: engine.fillCount, places, cancels,
     startEquity: s.startEquity, endEquity: s.equity,
     pnl: s.equity !== undefined && s.startEquity !== undefined ? s.equity - s.startEquity : 0,
-    edgeWindows, outputHash: hash.digest('hex'),
+    edgeWindows, outputHash: hash.digest('hex'), stateDigest: stateDigest(engine.snapshot()),
   };
 }
 
 async function cli(): Promise<void> {
   const dir = process.argv[2];
   if (!dir) {
-    console.error('usage: tsx apps/worker/src/replay.ts <recording dir, e.g. data/market/mexc-SOLUSDT>');
+    console.error('usage: tsx apps/worker/src/replay.ts <run dir containing meta.json, e.g. data/market/mexc-SOLUSDT/cfg-…>');
     process.exit(2);
   }
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));

@@ -3,35 +3,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { defaultStrategyConfig, syntheticMarket } from '@cortex/core';
 import { NdjsonRecorder, listRecordings } from '../recorder/ndjson';
 import { replay } from '../replay';
-import { ShadowEngine, type InputRecord } from './shadow-engine';
+import { syntheticInputs as inputs, testConfig as config, testEngineOptions as opts } from '../testing/synthetic-inputs';
+import { ShadowEngine, stateDigest, type EngineOutput, type EngineSnapshot, type InputRecord } from './shadow-engine';
 
-const rules = { tickSize: '0.01', stepSize: '0.01', minQty: '0.01', minNotional: 1 };
-const base = defaultStrategyConfig({ botId: 'mexc:SOLUSDT:shadow', base: 'SOL', quote: 'USDT', rules });
-const config = { ...base, as: { ...base.as, gamma: 0.02, k: 0.5 } };
-
-function inputs(minutes: number): InputRecord[] {
-  const out: InputRecord[] = [];
-  let nextClock = 0;
-  for (const m of syntheticMarket({ seed: 9, durationMs: minutes * 60_000, startPrice: 88, spreadTicks: 10, tradeRatePerSec: 3, sweepProb: 0.5 })) {
-    if (m.ts >= nextClock) {
-      out.push({ t: 'clock', ts: m.ts });
-      nextClock = m.ts + 1000;
-    }
-    if (m.kind === 'trade') out.push({ t: 'trade', ts: m.ts, price: m.price, qty: m.qty, aggressor: m.aggressor });
-    else out.push({ t: 'book', venue: m.kind === 'ref' ? 'reference' : 'local', ts: m.ts, bid: m.bid, bidQty: m.bidQty, ask: m.ask, askQty: m.askQty });
-  }
-  return out;
-}
-
-function runHash(recs: InputRecord[]) {
-  const e = new ShadowEngine({ config, startQuote: 15, latencyMs: 150, makerFeeRate: 0, edgeWindowMs: 10 * 60_000 });
+function runHash(recs: InputRecord[], e = new ShadowEngine(opts)) {
   const h = crypto.createHash('sha256');
   for (const r of recs) for (const o of e.process(r)) h.update(JSON.stringify(o));
   return { hash: h.digest('hex'), engine: e };
 }
+
+const viaJson = (s: EngineSnapshot): EngineSnapshot => JSON.parse(JSON.stringify(s)) as EngineSnapshot;
+const meta = { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 }, edgeWindowMs: 10 * 60_000 };
 
 describe('ShadowEngine', () => {
   it('replay is bit-exact, including through the gzip NDJSON recorder', async () => {
@@ -47,10 +31,12 @@ describe('ShadowEngine', () => {
     await rec.close();
     const files = listRecordings(dir);
     expect(files.length).toBeGreaterThan(0);
-    const fromDisk = await replay(files, { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 } });
+    const fromDisk = await replay(files, meta);
     expect(fromDisk.records).toBe(recs.length);
     expect(fromDisk.fills).toBe(a.engine.fillCount);
-    const again = await replay(files, { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 } });
+    expect(fromDisk.outputHash).toBe(a.hash);
+    expect(fromDisk.stateDigest).toBe(stateDigest(a.engine.snapshot()));
+    const again = await replay(files, meta);
     expect(again.outputHash).toBe(fromDisk.outputHash);
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -64,9 +50,70 @@ describe('ShadowEngine', () => {
   });
 
   it('closes MTM edge windows (hourly in production, 10 min here)', () => {
-    const e = new ShadowEngine({ config, startQuote: 15, latencyMs: 150, makerFeeRate: 0, edgeWindowMs: 10 * 60_000 });
+    const e = new ShadowEngine(opts);
     const edges = inputs(35).flatMap((r) => e.process(r)).filter((o) => o.kind === 'edge');
     expect(edges.length).toBe(3);
     expect(e.edge.n).toBe(3);
+  });
+});
+
+describe('ShadowEngine snapshot / restore', () => {
+  const recs = inputs(20, 11);
+  const full = runHash(recs);
+
+  it('restore at any cut point continues bit-exactly (outputs and final state)', () => {
+    expect(full.engine.fillCount).toBeGreaterThan(2);
+    const finalDigest = stateDigest(full.engine.snapshot());
+    const cuts = [1, 2, 37, 1_000, Math.floor(recs.length / 3), Math.floor(recs.length / 2), recs.length - 1];
+    for (const cut of cuts) {
+      const a = new ShadowEngine(opts);
+      for (const r of recs.slice(0, cut)) a.process(r);
+      const b = ShadowEngine.restore(opts, viaJson(a.snapshot()));
+      expect(stateDigest(b.snapshot())).toBe(stateDigest(a.snapshot()));
+      const restOfA = runHash(recs.slice(cut), a).hash;
+      const restOfB = runHash(recs.slice(cut), b).hash;
+      expect(restOfB).toBe(restOfA);
+      expect(stateDigest(b.snapshot())).toBe(finalDigest);
+      expect(b.ledger.balance('cash:USDT', 'USDT').toFixed()).toBe(full.engine.ledger.balance('cash:USDT', 'USDT').toFixed());
+    }
+  });
+
+  it('restores mid-flight state: working orders, sim queue, clientOrderId sequence', () => {
+    const a = new ShadowEngine(opts);
+    let cut = 0;
+    // Find a point with live orders on both the strategy and the simulated exchange.
+    for (; cut < recs.length; cut++) {
+      a.process(recs[cut]!);
+      if (cut > 2_000 && a.strategy.snapshot().workingOrders.length > 0 && a.sim.openOrders > 0) break;
+    }
+    expect(cut).toBeLessThan(recs.length);
+    const b = ShadowEngine.restore(opts, viaJson(a.snapshot()));
+    expect(b.strategy.snapshot()).toEqual(a.strategy.snapshot());
+    expect(b.sim.openOrders).toBe(a.sim.openOrders);
+    expect(b.strategy.snapshot().seq).toBeGreaterThan(0); // no duplicate clientOrderIds after a restart
+  });
+
+  it('refuses a snapshot from a different configuration or a tampered header/ledger', () => {
+    const a = new ShadowEngine(opts);
+    for (const r of recs.slice(0, 500)) a.process(r);
+    const s = viaJson(a.snapshot());
+    expect(() => ShadowEngine.restore({ ...opts, latencyMs: 151 }, s)).toThrow(/different configuration/);
+    expect(() => ShadowEngine.restore(opts, { ...s, records: s.records + 1 })).toThrow(/header/);
+    const unbalanced = viaJson(s);
+    unbalanced.ledger[0]!.postings[0]!.amount = '16';
+    expect(() => ShadowEngine.restore(opts, unbalanced)).toThrow(/sums to/);
+  });
+
+  it('health and command records drive risk deterministically', () => {
+    const e = new ShadowEngine(opts);
+    for (const r of recs.slice(0, 3_000)) e.process(r);
+    const ts = recs[2_999]!.ts;
+    const lag = e.process({ t: 'health', ts, errorsLastMin: 0, eventLoopLagMs: 500, clockSkewMs: 0 });
+    expect(lag.some((o: EngineOutput) => o.kind === 'action' && o.action.kind === 'risk' && o.action.action === 'pause')).toBe(true);
+    expect(e.strategy.snapshot().quoting).toBe(false);
+    e.process({ t: 'health', ts: ts + 1, errorsLastMin: 0, eventLoopLagMs: 5, clockSkewMs: 0 });
+    expect(e.strategy.snapshot().quoting).toBe(true);
+    e.process({ t: 'command', ts: ts + 2, command: 'pause' });
+    expect(e.strategy.snapshot().status).toBe('paused');
   });
 });
