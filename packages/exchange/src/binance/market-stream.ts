@@ -13,8 +13,13 @@ interface BinanceBookTicker {
   A: string;
 }
 
+type BinanceCombined = { stream?: string; data?: BinanceBookTicker };
+
 export function mapBinanceCombined(raw: string, ts: number, h: MarketDataHandlers): void {
-  const msg = JSON.parse(raw) as { stream?: string; data?: BinanceBookTicker };
+  mapBinanceMessage(JSON.parse(raw) as BinanceCombined, ts, h);
+}
+
+function mapBinanceMessage(msg: BinanceCombined, ts: number, h: MarketDataHandlers): void {
   const d = msg.data;
   if (!d || !msg.stream?.endsWith('@bookTicker')) return;
   const bid = Number(d.b);
@@ -39,11 +44,16 @@ export class BinanceMarketStream implements MarketStream {
       onState: (state, detail) => this.h.onStatus?.({ venue: 'binance', state, ...(detail ? { detail } : {}) }),
       onOpen: () => undefined,
       onMessage: (data) => {
+        let msg: BinanceCombined;
         try {
-          mapBinanceCombined(data.toString(), clock(), this.h);
+          msg = JSON.parse(data.toString()) as BinanceCombined;
         } catch (err) {
           this.h.onStatus?.({ venue: 'binance', state: 'error', detail: `parse: ${(err as Error).message}` });
+          return;
         }
+        // Outside the try: an exception thrown by a handler (the trading loop) must propagate and
+        // fail closed — never be mistaken for a bad message and swallowed.
+        mapBinanceMessage(msg, clock(), this.h);
       },
     });
   }

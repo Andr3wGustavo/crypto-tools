@@ -93,14 +93,21 @@ export class MexcRest {
     return body as T;
   }
 
-  /** Measures and stores the server-time offset; returns { offsetMs, rttMs }. */
-  async syncTime(): Promise<{ offsetMs: number; rttMs: number }> {
-    const t0 = Date.now();
-    const { serverTime } = await this.request<{ serverTime: number }>('GET', '/api/v3/time');
-    const t1 = Date.now();
-    const rttMs = t1 - t0;
-    this.timeOffsetMs = Math.round(serverTime - (t0 + rttMs / 2));
-    return { offsetMs: this.timeOffsetMs, rttMs };
+  /**
+   * Measures and stores the server-time offset (server − local). NTP-style: takes `samples`
+   * round trips and keeps the one with the smallest RTT, whose offset error is bounded by ±RTT/2
+   * (the first request also pays the TLS handshake, so a single sample is badly biased).
+   */
+  async syncTime(samples = 5): Promise<{ offsetMs: number; rttMs: number; samples: number }> {
+    let best: { offsetMs: number; rttMs: number } | undefined;
+    for (let i = 0; i < Math.max(1, samples); i++) {
+      const t0 = Date.now();
+      const { serverTime } = await this.request<{ serverTime: number }>('GET', '/api/v3/time');
+      const rttMs = Date.now() - t0;
+      if (!best || rttMs < best.rttMs) best = { offsetMs: Math.round(serverTime - (t0 + rttMs / 2)), rttMs };
+    }
+    this.timeOffsetMs = best!.offsetMs;
+    return { ...best!, samples: Math.max(1, samples) };
   }
 
   async symbolInfo(symbol: string): Promise<VenueSymbolInfo> {

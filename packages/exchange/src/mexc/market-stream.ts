@@ -51,11 +51,16 @@ export class MexcMarketStream implements MarketStream {
       onOpen: (ws: WebSocket) => ws.send(JSON.stringify({ method: 'SUBSCRIPTION', params: channels })),
       onMessage: (data, isBinary) => {
         if (!isBinary) return; // JSON control frames: subscription acks / PONG
+        let push: MexcPush;
         try {
-          mapMexcPush(decodeMexcPush(data as Buffer), clock(), this.h);
+          push = decodeMexcPush(data as Buffer);
         } catch (err) {
           this.h.onStatus?.({ venue: 'mexc', state: 'error', detail: `decode: ${(err as Error).message}` });
+          return;
         }
+        // Outside the try: an exception thrown by a handler (the trading loop) must propagate and
+        // fail closed — never be mistaken for a bad frame and swallowed.
+        mapMexcPush(push, clock(), this.h);
       },
     });
   }
