@@ -13,6 +13,7 @@ import { loadApiConfig } from './config';
 import { MemoryBotData } from './data';
 import { LiveHub, type HubSocket } from './hub';
 import { MemoryStore } from './store';
+import { sampleView } from './testing/fixtures';
 import { testWallet } from './testing/wallet';
 
 const ORIGIN = 'https://cortex-tokyo.example.ts.net';
@@ -22,18 +23,6 @@ const readToken = 'prometheus-token-for-tests-only-0123456789';
 const pauseToken = 'pause-only-token-for-tests-only-0123456789';
 const h = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
-export function sampleView(botId: string, ts: number, over: Partial<BotView> = {}): BotView {
-  return {
-    v: 1, botId, venue: 'mexc', mode: 'shadow', symbol: botId.split(':')[1]!, base: 'IO', quote: 'USDT', run: 'cfg-0123456789ab', version: 'test',
-    startedAt: ts - 60_000, ts, status: 'running', quoting: true, haltRule: null, reduceOnly: false,
-    market: { mid: 1.5, fair: 1.5001, refMid: 1.4999, bestBid: 1.49, bestAsk: 1.51, quoteBid: 1.495, quoteAsk: 1.505, halfSpreadBps: 33, toxic: false },
-    balances: { quote: 10, base: 3 }, pnl: { equity: 14.5, startEquity: 15, peakEquity: 15.1, realized: 0.01, unrealized: -0.02 },
-    risk: { sigmaBps: 12, adverseSelectionBps: 2.5, markoutsObserved: 40 },
-    orders: [], edge: { n: 3, meanBps: 0.4, sdBps: 9, pGo: 0.2, pPositive: 0.55, verdict: 'CONTINUE' },
-    counters: { records: 1000, fills: 5 }, feeds: { mexcAgeMs: 120, binanceAgeMs: 80 }, health: { errorsLastMin: 0, eventLoopLagMs: 3, clockSkewMs: -12 },
-    ...over,
-  };
-}
 const fill = (ts: number, id = 'f'): BotEvent => ({ k: 'fill', ts, fillId: id, clientOrderId: `c-${id}`, side: 'BUY', price: 1.49, qty: 4, fee: 0, feeAsset: 'quote' });
 const order = (ts: number): BotEvent => ({ k: 'order', ts, op: 'cancel', clientOrderId: 'x', reason: 'ttl' });
 
@@ -104,7 +93,6 @@ describe('dashboard read API', () => {
     const s = await setup();
     s.data.publishView(sampleView(BOT2, s.now()));
     s.data.publishView(sampleView(BOT, s.now(), { status: 'paused', quoting: false }));
-    expect((s.get('/bots').then((r) => r.json()) as Promise<{ bots: BotView[] }>)).resolves.toBeDefined();
     const list = (await s.get('/bots')).json() as { bots: BotView[]; missing: string[] };
     expect(list.bots.map((b) => [b.botId, b.status])).toEqual([[BOT, 'paused'], [BOT2, 'running']]);
     expect(list.missing).toEqual([]);
@@ -152,7 +140,7 @@ describe('dashboard read API', () => {
     const b = (await s.get(`/audit?before=${a.next}`)).json() as { entries: Array<{ action: string }> };
     expect(b.entries.map((e) => e.action)).toEqual(['auth.login']);
     s.data.publishView(sampleView(BOT, s.now() - 4_000));
-    const sys = (await s.get('/system')).json() as { bots: Array<{ ageMs: number }>; api: { redis: boolean } };
+    const sys = (await s.get('/system/info')).json() as { bots: Array<{ ageMs: number }>; api: { redis: boolean } };
     expect(sys.bots[0]!.ageMs).toBe(4_000);
     expect(sys.api.redis).toBe(true);
   });
@@ -298,7 +286,36 @@ describe('dashboard served from the API origin', () => {
     const miss = await s.get('/nope', { accept: 'application/json' });
     expect(miss.statusCode).toBe(404);
     expect(miss.json()).toEqual({ error: 'not found' });
+    // Every dashboard page path reloads into the shell, never into an API response.
+    for (const p of ['/risk', '/fills', '/logs', '/treasury', '/system', '/settings']) {
+      const r = await s.get(p, { accept: 'text/html' });
+      expect([p, r.statusCode, r.body.includes('<div id="root">')]).toEqual([p, 200, true]);
+    }
     // The data is still protected: the shell is public, the API behind it is not.
     expect((await s.get('/bots', { accept: 'text/html' })).statusCode).toBe(401);
+  });
+});
+
+describe('startup does not depend on the data store', () => {
+  it('a store that is down at boot: the hub starts at once, then loads the snapshot when it comes back', async () => {
+    const data = new MemoryBotData();
+    data.publishView(sampleView(BOT, 1));
+    let down = true;
+    const flaky = Object.assign(Object.create(data) as MemoryBotData, {
+      listBots: async () => {
+        if (down) throw new Error('ECONNREFUSED');
+        return data.listBots();
+      },
+    });
+    const hub = new LiveHub(flaky, { tickMs: 1_000_000 });
+    await hub.start(); // must not wait for the store
+    const sent: string[] = [];
+    hub.add({ socket: { bufferedAmount: 0, send: (x) => sent.push(x), close: () => undefined }, actor: 'a', stillAuthorized: async () => true });
+    expect((JSON.parse(sent[0]!) as { views: unknown[] }).views).toEqual([]);
+    down = false;
+    await hub.snapshotLoaded;
+    hub.add({ socket: { bufferedAmount: 0, send: (x) => sent.push(x), close: () => undefined }, actor: 'b', stillAuthorized: async () => true });
+    expect((JSON.parse(sent[1]!) as { views: Array<{ botId: string }> }).views.map((v) => v.botId)).toEqual([BOT]);
+    await hub.stop();
   });
 });

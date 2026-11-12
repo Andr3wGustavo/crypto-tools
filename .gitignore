@@ -32,3 +32,4 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+test-results/

@@ -352,7 +352,8 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance & { hub?: Li
     return { entries, next: entries.length === q.data.limit ? entries[entries.length - 1]!.ts : null };
   });
 
-  app.get('/system', async (req, reply) => {
+  // Not `/system`: that path is a dashboard page, and a reload must get the app shell.
+  app.get('/system/info', async (req, reply) => {
     if (!(await reader(req, reply))) return reply;
     const t = now();
     const views = (await data!.views(await data!.listBots())).filter((v) => v !== undefined);

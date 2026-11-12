@@ -30,6 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run db:generate
       - run: npm run typecheck
+      - run: npm run web:build
       - run: npx vitest run --coverage
         env:
           REDIS_TEST_URL: redis://localhost:6379
@@ -37,6 +38,27 @@ jobs:
         run: npx prisma validate --schema packages/db/prisma/schema.prisma
         env:
           DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+  e2e:
+    # The dashboard in a real browser (desktop + mobile): Phantom sign-in, every page, the 2FA
+    # command flow, no console errors (so no CSP violations), no horizontal scroll.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-screens
+          path: test-results/
+          retention-days: 14
 
   migrate:
     runs-on: ubuntu-latest
@@ -68,7 +90,7 @@ jobs:
     # Pushed to GHCR on pushes (tag = first 12 chars of the commit); PRs only build.
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [check, migrate]
+    needs: [check, migrate, e2e]
     permissions:
       contents: read
       packages: write

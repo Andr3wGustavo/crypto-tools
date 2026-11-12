@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **60 / 100** (E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 core done (auth + commands), WS/metrics with E6; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **72 / 100** (E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -113,7 +113,39 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
   - **TOTP rejected every code**: `\d` inside a template-literal `RegExp` became `d`, so the regex never matched a digit.
   - **SIWS padding**: the parser accepted padded field values.
   - **Event-loop starvation**: the command loop could starve the event loop with a non-blocking client.
-- ⬜ WebSocket snapshot + deltas for the dashboard, OpenAPI + typed client, `/metrics` (prom-client), and the `AuditLog` view (with E6)
+- ✅ **Read side** (done with E6): `GET /bots`, `/bots/:id`, `/bots/:id/{events,fills,series}`, `/audit`, `/system/info`, `/metrics` (prom-client, read-scoped), and `/ws` (below).
+- ✅ **Typed client instead of OpenAPI codegen** (decision): the API and the dashboard share the versioned contracts in `packages/shared/src/dashboard.ts`, so a contract change breaks the typecheck of both sides at once, with no generator step. OpenAPI can be generated from the same schemas later if a third client needs it.
+
+## E6 — Web3 dashboard → 80
+- ✅ **Contracts** (`@cortex/shared`): `BotView` v1, `SeriesPoint`, `BotEvent`, live and WebSocket messages. They are wire types, decoupled from the engine internals.
+- ✅ **Worker publisher** (`ops/bot-view.ts` + `sinks/redis-sink.ts`):
+  - the view at most 1/s; a chart point every 5 s, 24 h kept; event and fill streams; live pub/sub tagged with stream ids;
+  - ordered and bounded (drops and counts, never blocks the engine);
+  - read-only: a test proves the replay digest is identical with and without it.
+- ✅ **Live hub** (`apps/api/src/hub.ts`): one Redis subscription for all clients, coalesced ticks at about 4 Hz.
+  - A snapshot on every (re)connect, so a missed delta can never leave the screen wrong.
+  - The upgrade is authorised before the socket opens: session or read token, plus an Origin check against cross-site WebSocket hijacking.
+  - Sessions are revalidated every 30 s (logout or revocation → 4401). A slow consumer is closed (4408) instead of buffering. The feed is read-only.
+  - It starts even with Redis down (a bug found by the bundle smoke test, fixed and tested).
+- ✅ **Dashboard** (`apps/web`): Vite + React 19 + Tailwind v4 + TanStack Query + Lightweight Charts, served by the API **from the same origin**. That means no CORS, a strict CSP (`script-src 'self'`, `font-src 'self'`, `frame-ancestors 'none'`) and a single container.
+  - **Pages**: Overview (KPIs, Revert-style position cards with the quote band, sparkline, P(edge>0)), Bot detail (live price with the MEXC/Binance/fair/our-quotes lines and fill markers, PnL waterfall, risk, edge with the "uncorrected" caveat, orders, events, health, controls), Risk Center (pause-all kill switch, incidents), Fills (paging + CSV), Logs (live, filters, search), System, Cash & Treasury (honest D0 state), Settings (session, audit log).
+  - **Commands**: pause is one click; resume and resets go through a TOTP modal.
+  - **Sign-in**: Phantom. The page refuses to sign any message that is not a sign-in for its own domain and address.
+  - **Built from these specs**: mobile-first, loading/empty/disconnected states, pt-BR.
+- ✅ **Dev server** (`npm run dev:dashboard`): the real API and the real engine, fed by a real recording (or a seeded synthetic market). It lets the dashboard run with no Docker, Redis or Postgres.
+- ✅ **Evidence**:
+  - 206 unit and integration tests (169 before).
+  - 5 Playwright E2E runs (desktop 1440×900 and Pixel 7): Phantom sign-in through the UI, every page, no console errors (so no CSP violations), no horizontal scroll, and the command flow (pause → wrong 2FA code refused → valid code → resumed, confirmed in the log).
+  - CI job `e2e` uploads the screenshots. Samples are in [docs/e6](e6/).
+- ✅ **Bugs the tests caught**:
+  - Vite inlined fonts as `data:` URIs, which the CSP blocked. Fixed by never inlining assets (the CSP was not relaxed).
+  - `/system` was both an API route and a dashboard page, so a reload showed JSON. The API route moved to `/system/info`, with a regression test over every page path.
+  - On mobile the header overflowed: `hidden` lost to the Pill's `inline-flex`.
+  - The same fill showed twice: it has a different stream id in the events and fills streams. It is now deduplicated by `fillId`.
+  - The API would not start with Redis down.
+  - A relative `API_WEB_DIR` crashed the static server.
+- ⏸ **Proof per the plan**: live screenshots on the PC and the phone through Tailscale (needs the VPS, E4).
+- ⬜ Later (E7): Edge Lab, Simulator and Pair Scanner pages. Treasury on-chain (wallet balance, withdrawals with Solscan links) arrives with E9.
 
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.

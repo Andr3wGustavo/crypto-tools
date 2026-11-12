@@ -122,7 +122,10 @@ export class RedisBotData implements BotData {
         /* a malformed message is dropped */
       }
     });
-    await sub.psubscribe(LIVE_PATTERN);
+    sub.on('error', () => undefined); // reconnects by itself; readiness is reported by /readyz
+    // Not awaited: while Redis is down the command is queued and runs on connect, and ioredis
+    // re-subscribes after every reconnect. Startup never waits for Redis.
+    sub.psubscribe(LIVE_PATTERN).catch(() => undefined);
     return async () => {
       await sub.punsubscribe(LIVE_PATTERN).catch(() => undefined);
       sub.disconnect();

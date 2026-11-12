@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { z } from 'zod';
 import { base32Decode, solanaPublicKey } from './auth/encoding';
 
@@ -58,7 +59,8 @@ export const ApiConfigSchema = z
       cookieSecure: c.API_COOKIE_SECURE,
       trustProxy: c.API_TRUST_PROXY,
       redisUrl: c.REDIS_URL,
-      webDir: c.API_WEB_DIR || undefined,
+      // Absolute: @fastify/static refuses a relative root.
+      webDir: c.API_WEB_DIR ? path.resolve(c.API_WEB_DIR) : undefined,
     };
   });
 

@@ -58,17 +58,42 @@ export class LiveHub {
     return this.clients.size;
   }
 
+  /**
+   * Never blocks and never throws: the API must come up (and report not-ready) even when Redis
+   * is down. The subscription is (re)established by the client library; the initial snapshot is
+   * retried with backoff until it loads, while live views fill `latest` as they arrive.
+   */
   async start(): Promise<void> {
+    this.stopped = false;
     this.unsubscribe = await this.data.subscribe((m) => this.onMessage(m));
-    const ids = await this.data.listBots();
-    (await this.data.views(ids)).forEach((v) => v && this.latest.set(v.botId, v));
     this.timer = setInterval(() => this.tick(), this.o.tickMs);
     this.revalidator = setInterval(() => void this.revalidate(), this.o.revalidateMs);
     this.timer.unref();
     this.revalidator.unref();
+    void this.loadSnapshot();
+  }
+
+  private stopped = false;
+  /** Resolves once the initial views are loaded (tests and readiness); retried with backoff. */
+  snapshotLoaded: Promise<void> = Promise.resolve();
+  private loadSnapshot(): Promise<void> {
+    this.snapshotLoaded = (async () => {
+      for (let attempt = 0; !this.stopped; attempt++) {
+        try {
+          const ids = await this.data.listBots();
+          // Live views that arrived meanwhile are newer: never overwrite them with the stored ones.
+          (await this.data.views(ids)).forEach((v) => v && !this.latest.has(v.botId) && this.latest.set(v.botId, v));
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, Math.min(30_000, 500 * 2 ** attempt)).unref());
+        }
+      }
+    })();
+    return this.snapshotLoaded;
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     clearInterval(this.timer);
     clearInterval(this.revalidator);
     for (const c of this.clients) this.bye(c, 'shutdown', 1001);

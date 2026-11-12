@@ -12,3 +12,4 @@ docs
 !.env.example
 *.log
 *.ndjson*
+test-results

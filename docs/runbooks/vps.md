@@ -59,6 +59,10 @@ A API nunca vê chaves da corretora. Ela só autentica você e enfileira comando
    - Com isso, o bot pode pausar, mas nunca retomar.
 5. **Ativar:** `COMPOSE_PROFILES=api` no `cortex.env`, depois deploy.
 6. **HTTPS só no tailnet:** `sudo tailscale serve --bg --https=443 http://127.0.0.1:8080`. A porta 8080 fica presa no loopback do host.
+7. **Dashboard (E6):** a mesma imagem da API serve o painel na mesma origem. Abra `https://cortex-tokyo.<seu-tailnet>.ts.net`.
+   - No PC: extensão Phantom.
+   - No celular: abra o endereço **dentro do navegador do app Phantom** (o Tailscale precisa estar ligado no celular).
+   - Para ver o painel no PC sem VPS, com dados reais gravados: `npm run web:build && npm run dev:dashboard` → `http://127.0.0.1:8080`. A carteira e o TOTP desse modo são de desenvolvimento e não valem nada.
 
 **Regras de segurança**, todas com teste em `apps/api/src/app.test.ts`:
 
@@ -74,6 +78,8 @@ A API nunca vê chaves da corretora. Ela só autentica você e enfileira comando
 | Revogação | tirar a carteira da allowlist derruba as sessões dela na próxima requisição |
 | Rate limit | rotas de login: 10/min por IP; comandos: 30/min |
 | Auditoria | todo login, recusa e comando é gravado no `AuditLog` |
+| Feed ao vivo (`/ws`) | só abre com sessão ou token `read`, e só vindo da própria origem; a sessão é revalidada a cada 30 s; o feed é só leitura |
+| CSP | `script-src 'self'`, sem `eval`, sem iframe (`frame-ancestors 'none'`); fontes e imagens só da própria origem |
 
 ## 3. Escolher os pares (pré-registro)
 

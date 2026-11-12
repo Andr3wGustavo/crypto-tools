@@ -4,6 +4,24 @@
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
+# ---- web: the dashboard is static, so it is built once on the build machine (no QEMU) ---------
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS web
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/worker/package.json apps/worker/
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY apps/sentinel/package.json apps/sentinel/
+COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
+COPY packages/exchange/package.json packages/exchange/
+COPY packages/shared/package.json packages/shared/
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund --ignore-scripts
+COPY tsconfig.base.json ./
+COPY packages/shared ./packages/shared
+COPY apps/web ./apps/web
+RUN npm run build -w @cortex/web
+
 # ---- build: install, generate Prisma for THIS platform, bundle -------------------------------
 FROM ${NODE_IMAGE} AS build
 WORKDIR /app
@@ -11,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-cert
 COPY package.json package-lock.json ./
 COPY apps/worker/package.json apps/worker/
 COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
 COPY apps/sentinel/package.json apps/sentinel/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
@@ -53,15 +72,18 @@ VOLUME ["/data"]
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "--enable-source-maps", "dist/main.js"]
 
-# ---- api: operator API (SIWS + TOTP, commands → worker stream). Never holds exchange keys. ----
+# ---- api: operator API (SIWS + TOTP, commands → worker stream) + the dashboard, same origin. ---
+#      Never holds exchange keys.
 FROM ${NODE_IMAGE} AS api
 ARG APP_VERSION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates tini && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production \
     API_HOST=0.0.0.0 \
+    API_WEB_DIR=/app/web \
     APP_VERSION=${APP_VERSION}
 COPY --from=build /app/dist/api ./dist
+COPY --from=web /app/apps/web/dist ./web
 COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 USER node
