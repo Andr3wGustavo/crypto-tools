@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { StrategyConfig } from '@cortex/core';
+import { metaToOptions, type ReplayMeta } from './engine/run-meta';
 import { ShadowEngine, stateDigest, type EngineOutput } from './engine/shadow-engine';
 import { listRecordings, readNdjsonGz } from './recorder/ndjson';
 
@@ -26,26 +26,10 @@ export interface ReplaySummary {
   stateDigest: string;
 }
 
-export interface ReplayMeta {
-  config: StrategyConfig;
-  startQuote: number;
-  latencyMs: number;
-  info: { makerFeeRate: number };
-  timerMs?: number;
-  edgeWindowMs?: number;
-  /** Written by the worker since E3; checked when present. */
-  configHash?: string;
-}
+export type { ReplayMeta };
 
 export async function replay(files: string[], meta: ReplayMeta): Promise<ReplaySummary> {
-  const engine = new ShadowEngine({
-    config: meta.config, startQuote: meta.startQuote, latencyMs: meta.latencyMs, makerFeeRate: meta.info.makerFeeRate,
-    ...(meta.timerMs !== undefined ? { timerMs: meta.timerMs } : {}),
-    ...(meta.edgeWindowMs !== undefined ? { edgeWindowMs: meta.edgeWindowMs } : {}),
-  });
-  if (meta.configHash && meta.configHash !== engine.configHash) {
-    throw new Error(`meta.json configHash ${meta.configHash.slice(0, 12)} ≠ engine ${engine.configHash.slice(0, 12)} (engine version or config changed)`);
-  }
+  const engine = new ShadowEngine(metaToOptions(meta));
   const hash = crypto.createHash('sha256');
   let records = 0;
   let outputs = 0;

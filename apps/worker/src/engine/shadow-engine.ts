@@ -165,6 +165,12 @@ export class ShadowEngine {
     e.book = new Ledger();
     for (const tx of s.ledger) e.book.post(tx);
     if (e.records !== s.records || e.lastTs !== s.lastTs) throw new Error('snapshot header does not match its state');
+    // The ledger must explain the strategy's balances (unless a divergence was already recorded:
+    // then the sticky halt is part of the state and the mismatch is expected).
+    const diffs = e.ledgerDiffs();
+    if (!e.reconcileDiverged && diffs.length > 0) {
+      throw new Error(`snapshot ledger does not match the strategy balances (${diffs.map((d) => `${d.asset}: ${d.ledger} vs ${d.strategy}`).join(', ')})`);
+    }
     return e;
   }
 
@@ -207,6 +213,14 @@ export class ShadowEngine {
    */
   private reconcile(ts: number, out: EngineOutput[]): void {
     if (this.reconcileDiverged) return;
+    const diffs = this.ledgerDiffs();
+    if (diffs.length === 0) return;
+    this.reconcileDiverged = true;
+    out.push({ kind: 'reconcile', ts, ok: false, diffs });
+    this.feedHealth(ts, out);
+  }
+
+  private ledgerDiffs(): Array<{ asset: string; ledger: string; strategy: number }> {
     const { base, quote } = this.o.config;
     const s = this.strategy.snapshot();
     const diffs: Array<{ asset: string; ledger: string; strategy: number }> = [];
@@ -214,10 +228,7 @@ export class ShadowEngine {
       const l = this.book.balance(`cash:${asset}`, asset);
       if (Math.abs(l.toNumber() - mine) > RECONCILE_TOL * Math.max(1, Math.abs(mine))) diffs.push({ asset, ledger: l.toFixed(), strategy: mine });
     }
-    if (diffs.length === 0) return;
-    this.reconcileDiverged = true;
-    out.push({ kind: 'reconcile', ts, ok: false, diffs });
-    this.feedHealth(ts, out);
+    return diffs;
   }
 
   /** One observation per window: MTM equity return in bps (includes inventory — no survivorship bias). */

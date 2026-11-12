@@ -7,6 +7,7 @@ import { BinanceMarketStream, MexcMarketStream, MexcRest } from '@cortex/exchang
 import { loadConfig } from './config';
 import { engineConfigHash, stateDigest, type EngineOutput, type InputRecord, type ShadowEngineOptions } from './engine/shadow-engine';
 import { createLogger } from './logger';
+import { heartbeatFile, writeHeartbeat } from './ops/heartbeat';
 import { NdjsonRecorder } from './recorder/ndjson';
 import { PostgresSink } from './sinks/postgres-sink';
 import { RedisSink } from './sinks/redis-sink';
@@ -31,7 +32,9 @@ const num = (v: string | undefined, d: number) => (v !== undefined && v !== '' ?
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const log = createLogger(cfg.LOG_LEVEL);
-  log.info({ mode: cfg.TRADING_MODE, symbol: cfg.BOT_SYMBOL, reference: cfg.BOT_REFERENCE_SYMBOL }, 'Cortex Farm worker starting (SHADOW: no orders are sent)');
+  const version = process.env.APP_VERSION ?? 'dev';
+  const startedAt = Date.now();
+  log.info({ mode: cfg.TRADING_MODE, symbol: cfg.BOT_SYMBOL, reference: cfg.BOT_REFERENCE_SYMBOL, version }, 'Cortex Farm worker starting (SHADOW: no orders are sent)');
 
   const rest = new MexcRest();
   let clockSkewMs = 0;
@@ -196,6 +199,23 @@ async function main(): Promise<void> {
     }
   }, num(process.env.SNAPSHOT_EVERY_MS, 60_000));
 
+  // Heartbeat for the dead-man sidecar and the deploy smoke test (process alive + feeds alive + status).
+  const hbFile = heartbeatFile(process.env.HEARTBEAT_DIR ?? path.join(cfg.MARKET_DATA_DIR, '..', 'health'), info.symbol);
+  const finiteOrNull = (x: number | undefined) => (x !== undefined && Number.isFinite(x) ? Math.round(x * 1e4) / 1e4 : null);
+  const beat = () => {
+    try {
+      const s = engine.strategy.snapshot();
+      writeHeartbeat(hbFile, {
+        symbol: info.symbol, run: runId, version, pid: process.pid, startedAt, ts: Date.now(), records: engine.recordCount, fills: engine.fillCount,
+        status: s.status, mexcAgeMs: finiteOrNull(mexc.lastMessageAgeMs()), binanceAgeMs: finiteOrNull(binance.lastMessageAgeMs()), equity: finiteOrNull(s.equity),
+      });
+    } catch (err) {
+      noteError();
+      log.warn({ err: (err as Error).message }, 'heartbeat write failed');
+    }
+  };
+  const heartbeat = setInterval(beat, num(process.env.HEARTBEAT_EVERY_MS, 10_000));
+
   const loopDelay = monitorEventLoopDelay({ resolution: 20 });
   loopDelay.enable();
   const status = setInterval(() => {
@@ -225,7 +245,7 @@ async function main(): Promise<void> {
     stopping = true;
     setTimeout(() => process.exit(code || 1), 15_000).unref(); // never hang on a stuck sink
     log[code === 0 ? 'info' : 'error']({ reason }, 'shutting down');
-    for (const t of [clock, health, resync, snapshots, status]) clearInterval(t);
+    for (const t of [clock, health, resync, snapshots, status, heartbeat]) clearInterval(t);
     mexc.stop();
     binance.stop();
     await recorder.close();
@@ -241,7 +261,7 @@ async function main(): Promise<void> {
     }
     const s = engine.strategy.snapshot();
     log.info({
-      run: runId, records: engine.recordCount, recordedThisProcess: recorder.count, fills: engine.fillCount,
+      run: runId, version, records: engine.recordCount, recordedThisProcess: recorder.count, fills: engine.fillCount,
       startEquity: s.startEquity, endEquity: s.equity, snapshot, stateDigest: digest, outputHash: outputHash.digest('hex'),
     }, 'session summary (stateDigest must equal a full replay of the run)');
     await pg?.close();

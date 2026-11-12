@@ -102,6 +102,8 @@ describe('ShadowEngine snapshot / restore', () => {
     const unbalanced = viaJson(s);
     unbalanced.ledger[0]!.postings[0]!.amount = '16';
     expect(() => ShadowEngine.restore(opts, unbalanced)).toThrow(/sums to/);
+    // Balanced but not the strategy's history (here: no deposit at all) — caught by reconciliation on load.
+    expect(() => ShadowEngine.restore(opts, { ...s, ledger: [] })).toThrow(/does not match the strategy balances/);
   });
 
   it('health and command records drive risk deterministically', () => {
