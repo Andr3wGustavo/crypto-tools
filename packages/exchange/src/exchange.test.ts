@@ -56,6 +56,11 @@ describe('MEXC REST', () => {
       makerFeeRate: 0, takerFeeRate: 0.0005, tradable: true,
     });
     expect(mexcSymbolInfo({ ...raw, quotePrecision: 4 }).rules.tickSize).toBe('0.0001');
+    // baseSizePrecision "0" (no explicit minimum, most of the market): step = 10^-baseAssetPrecision.
+    expect(mexcSymbolInfo({ ...raw, baseSizePrecision: '0', baseAssetPrecision: 2 }).rules).toMatchObject({ stepSize: '0.01', minQty: '0.01' });
+    expect(mexcSymbolInfo({ ...raw, baseSizePrecision: '0', baseAssetPrecision: 0 }).rules.stepSize).toBe('1');
+    expect(() => mexcSymbolInfo({ ...raw, baseSizePrecision: '0', baseAssetPrecision: undefined })).toThrow(/baseAssetPrecision/);
+    expect(() => mexcSymbolInfo({ ...raw, quotePrecision: 1.5 })).toThrow(/quotePrecision/);
   });
 
   it('signs with HMAC-SHA256 (hex) and sends the key header only on signed calls', async () => {

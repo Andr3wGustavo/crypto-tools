@@ -11,25 +11,51 @@ export interface MexcSymbolRaw {
   baseAsset: string;
   quoteAsset: string;
   quotePrecision: number;
+  /** Decimals allowed in the base quantity. */
+  baseAssetPrecision?: number;
+  /** Minimum quantity / step; "0" on ~80% of symbols (no explicit minimum → use baseAssetPrecision). */
   baseSizePrecision: string;
   quoteAmountPrecision: string;
   makerCommission: string;
   takerCommission: string;
   isSpotTradingAllowed: boolean;
+  /** "ST" = special treatment (risk warning / delisting watch). */
+  st?: boolean;
+}
+
+export interface MexcTicker24h {
+  symbol: string;
+  bidPrice: string;
+  askPrice: string;
+  lastPrice: string;
+  quoteVolume: string;
+}
+
+export interface MexcBookTicker {
+  symbol: string;
+  bidPrice: string;
+  bidQty: string;
+  askPrice: string;
+  askQty: string;
+}
+
+export interface MexcPublicTrade {
+  price: string;
+  qty: string;
+  time: number;
+  isBuyerMaker: boolean;
 }
 
 /**
  * MEXC rules → exchange-agnostic SymbolRules.
  *   tick          = 10^(−quotePrecision)
- *   step / minQty = baseSizePrecision        (e.g. "0.01")
+ *   step / minQty = baseSizePrecision (e.g. "0.01"); when it is "0" (no explicit minimum, ~80% of
+ *                   the market), 10^(−baseAssetPrecision) — the finest quantity the venue accepts
  *   minNotional   = quoteAmountPrecision     (minimum order value in quote, e.g. "1" USDT)
  */
 export function mexcSymbolInfo(raw: MexcSymbolRaw): VenueSymbolInfo {
-  if (!Number.isInteger(raw.quotePrecision) || raw.quotePrecision < 0 || raw.quotePrecision > 18) {
-    throw new RangeError(`unexpected quotePrecision ${raw.quotePrecision}`);
-  }
-  const tickSize = raw.quotePrecision === 0 ? '1' : `0.${'0'.repeat(raw.quotePrecision - 1)}1`;
-  const step = raw.baseSizePrecision;
+  const tickSize = decimalUnit(raw.quotePrecision, 'quotePrecision');
+  const step = Number(raw.baseSizePrecision) > 0 ? raw.baseSizePrecision : decimalUnit(raw.baseAssetPrecision, 'baseAssetPrecision');
   const minNotional = Number(raw.quoteAmountPrecision);
   if (!(Number(step) > 0) || !(minNotional > 0)) throw new RangeError(`invalid rules for ${raw.symbol}`);
   const rules: SymbolRules = { tickSize, stepSize: step, minQty: step, minNotional };
@@ -42,6 +68,12 @@ export function mexcSymbolInfo(raw: MexcSymbolRaw): VenueSymbolInfo {
     takerFeeRate: Number(raw.takerCommission),
     tradable: raw.status === '1' && raw.isSpotTradingAllowed,
   };
+}
+
+/** 10^(−decimals) as an exact decimal string ("1", "0.1", "0.001", …). */
+function decimalUnit(decimals: number | undefined, field: string): string {
+  if (decimals === undefined || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new RangeError(`unexpected ${field} ${decimals}`);
+  return decimals === 0 ? '1' : `0.${'0'.repeat(decimals - 1)}1`;
 }
 
 export class MexcRestError extends Error {
@@ -117,8 +149,27 @@ export class MexcRest {
     return mexcSymbolInfo(raw);
   }
 
-  async bookTicker(symbol: string): Promise<{ bidPrice: string; bidQty: string; askPrice: string; askQty: string }> {
+  async bookTicker(symbol: string): Promise<MexcBookTicker> {
     return this.request('GET', '/api/v3/ticker/bookTicker', { symbol: symbol.toUpperCase() });
+  }
+
+  // ---------------- public, whole market (pair scanner) ----------------
+
+  async exchangeInfoAll(): Promise<MexcSymbolRaw[]> {
+    return (await this.request<{ symbols: MexcSymbolRaw[] }>('GET', '/api/v3/exchangeInfo')).symbols;
+  }
+
+  ticker24hAll(): Promise<MexcTicker24h[]> {
+    return this.request('GET', '/api/v3/ticker/24hr');
+  }
+
+  bookTickerAll(): Promise<MexcBookTicker[]> {
+    return this.request('GET', '/api/v3/ticker/bookTicker');
+  }
+
+  /** Most recent public trades (max 1000). */
+  trades(symbol: string, limit = 1_000): Promise<MexcPublicTrade[]> {
+    return this.request('GET', '/api/v3/trades', { symbol: symbol.toUpperCase(), limit: Math.min(1_000, Math.max(1, limit)) });
   }
 
   // ---------------- signed (live, phase E8) ----------------
