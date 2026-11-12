@@ -8,12 +8,13 @@ import { loadConfig } from './config';
 import { engineConfigHash, stateDigest, type EngineOutput, type InputRecord, type ShadowEngineOptions } from './engine/shadow-engine';
 import { createLogger } from './logger';
 import Redis from 'ioredis';
+import { BotViewBuilder, toWireEvents } from './ops/bot-view';
 import { CommandSource } from './ops/command-source';
 import { heartbeatFile, writeHeartbeat } from './ops/heartbeat';
 import { IoRedisStreamClient } from './ops/redis-stream-client';
 import { NdjsonRecorder } from './recorder/ndjson';
 import { PostgresSink } from './sinks/postgres-sink';
-import { RedisSink } from './sinks/redis-sink';
+import { IoRedisLive, RedisSink } from './sinks/redis-sink';
 import { SnapshotStore, bootEngine } from './state/boot';
 import { shadowStrategyConfig } from './strategy-config';
 
@@ -93,14 +94,21 @@ async function main(): Promise<void> {
       log.warn({ err: (err as Error).message }, 'Postgres unavailable — continuing with file recording only');
     }
   }
+  // Dashboard view (read-only mapping of engine state to the @cortex/shared contracts).
+  const viewer = new BotViewBuilder({ botId, mode: 'shadow', symbol: info.symbol, base: config.base, quote: config.quote, run: runId, version, startedAt });
+  let redisConn: IoRedisLive | undefined;
   let redis: RedisSink | undefined;
   if (cfg.REDIS_URL) {
-    const sink = new RedisSink(cfg.REDIS_URL, botId, log);
+    const conn = new IoRedisLive(cfg.REDIS_URL, log);
     try {
+      await conn.connect();
+      const sink = new RedisSink(conn, botId, log);
       await sink.init();
+      redisConn = conn;
       redis = sink;
       log.info('Redis real-time fan-out enabled');
     } catch (err) {
+      await conn.close();
       log.warn({ err: (err as Error).message }, 'Redis unavailable — continuing without real-time fan-out');
     }
   }
@@ -142,7 +150,8 @@ async function main(): Promise<void> {
     }
     for (const o of outs) outputHash.update(JSON.stringify(o));
     pg?.push(outs);
-    redis?.push(outs, () => engine.strategy.snapshot(), r.ts);
+    viewer.observe(r, outs);
+    redis?.push(toWireEvents(outs), r.ts, () => viewer.view(engine, { mexcAgeMs: mexc.lastMessageAgeMs(), binanceAgeMs: binance.lastMessageAgeMs() }), (v) => viewer.point(v));
     notable(outs);
   };
 
@@ -244,7 +253,7 @@ async function main(): Promise<void> {
       inventory: s.baseTotal, sigmaBps: Number(s.sigmaBps.toFixed(3)), asBps: Number(s.adverseSelectionBps.toFixed(3)),
       fills: engine.fillCount, working: s.workingOrders.map((o) => `${o.side}@${o.priceStr}`),
       edge: { n: engine.edge.n, pGo: Number(v.pGo.toFixed(3)), verdict: v.verdict },
-      records: engine.recordCount, recordedThisProcess: recorder.count, sinkErrors: (pg?.errors ?? 0) + (redis?.errors ?? 0),
+      records: engine.recordCount, recordedThisProcess: recorder.count, sinkErrors: (pg?.errors ?? 0) + (redis?.errors ?? 0) + (redisConn?.errors ?? 0),
       errorsLastMin: errorTimes.length, clockSkewMs,
       loopLagP99Ms: Number((loopDelay.percentile(99) / 1e6).toFixed(1)),
       dataAgeMs: { mexc: mexc.lastMessageAgeMs(), binance: binance.lastMessageAgeMs() },
@@ -285,7 +294,8 @@ async function main(): Promise<void> {
       startEquity: s.startEquity, endEquity: s.equity, snapshot, stateDigest: digest, outputHash: outputHash.digest('hex'),
     }, 'session summary (stateDigest must equal a full replay of the run)');
     await pg?.close();
-    await redis?.close();
+    await redis?.flush();
+    await redisConn?.close();
     await disconnectPrisma().catch(() => undefined);
     log.info('bye');
     process.exit(code);

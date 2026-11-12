@@ -1,4 +1,4 @@
-import { CommandEnvelopeSchema, RISKY_COMMANDS, commandStreamKey, type CommandEnvelope } from '@cortex/shared';
+import { CommandEnvelopeSchema, RISKY_COMMANDS, commandStreamKey, type BotEvent, type CommandEnvelope } from '@cortex/shared';
 
 /**
  * Operator commands from the API (Redis stream `bot:<botId>:commands`) into the engine.
@@ -23,7 +23,8 @@ export interface StreamClient {
   /** id '0' = this consumer's pending (unacked) entries, '>' = new entries. */
   readGroup(stream: string, group: string, consumer: string, id: '0' | '>', count: number, blockMs: number): Promise<StreamEntry[]>;
   ack(stream: string, group: string, id: string): Promise<void>;
-  publish(stream: string, payload: Record<string, unknown>): Promise<void>;
+  /** Appends to the bot's event stream and notifies the live channel (dashboard). */
+  publishEvent(botId: string, e: BotEvent): Promise<void>;
 }
 
 export type CommandDecision = { apply: true; envelope: CommandEnvelope } | { apply: false; reason: string; envelope?: CommandEnvelope };
@@ -89,12 +90,13 @@ export class CommandSource {
       } else {
         this.refused++;
       }
-      const result = d.apply
-        ? { kind: 'command_ack', id: d.envelope.id, command: d.envelope.command, actor: d.envelope.actor, applied: true }
-        : { kind: 'command_ack', id: d.envelope?.id ?? null, command: d.envelope?.command ?? null, actor: d.envelope?.actor ?? null, applied: false, reason: d.reason };
+      const ts = this.now();
+      const result: BotEvent = d.apply
+        ? { k: 'command', ts, id: d.envelope.id, command: d.envelope.command, actor: d.envelope.actor, applied: true }
+        : { k: 'command', ts, id: d.envelope?.id ?? null, command: d.envelope?.command ?? null, actor: d.envelope?.actor ?? null, applied: false, reason: d.reason };
       this.o.log?.[d.apply ? 'info' : 'warn']({ ...result, entry: e.id }, d.apply ? 'operator command applied' : 'operator command refused');
       await client.ack(this.stream, COMMAND_GROUP, e.id);
-      await client.publish(`bot:${this.o.botId}:events`, result).catch(() => this.o.onError?.());
+      await client.publishEvent(this.o.botId, result).catch(() => this.o.onError?.());
     }
     return entries.length;
   }

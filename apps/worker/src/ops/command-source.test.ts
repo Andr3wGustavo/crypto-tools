@@ -32,7 +32,7 @@ class FakeStreams implements StreamClient {
   async ack(_s: string, _g: string, id: string) {
     this.pending.delete(id);
   }
-  async publish(_s: string, payload: Record<string, unknown>) {
+  async publishEvent(_b: string, payload: Record<string, unknown>) {
     this.published.push(payload);
   }
 }

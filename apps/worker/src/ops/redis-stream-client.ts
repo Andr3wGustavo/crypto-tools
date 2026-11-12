@@ -1,3 +1,4 @@
+import { EVENTS_MAX, botKeys, type BotEvent, type LiveMessage } from '@cortex/shared';
 import type Redis from 'ioredis';
 import type { StreamClient, StreamEntry } from './command-source';
 
@@ -34,7 +35,10 @@ export class IoRedisStreamClient implements StreamClient {
     await this.r.call('XACK', stream, group, id);
   }
 
-  async publish(stream: string, payload: Record<string, unknown>): Promise<void> {
-    await this.r.call('XADD', stream, 'MAXLEN', '~', '10000', '*', 'o', JSON.stringify(payload));
+  async publishEvent(botId: string, e: BotEvent): Promise<void> {
+    const k = botKeys(botId);
+    const id = (await this.r.call('XADD', k.events, 'MAXLEN', '~', String(EVENTS_MAX), '*', 'e', JSON.stringify(e))) as string;
+    const msg: LiveMessage = { t: 'event', botId, id, e };
+    await this.r.call('PUBLISH', k.live, JSON.stringify(msg));
   }
 }

@@ -6,9 +6,9 @@ import { z } from 'zod';
  * the worker records it as an input (so it is replayable) and applies it.
  */
 
-/** `mexc:<SYMBOL>:<mode>` — the worker's bot id. */
-export const BOT_ID_RE = /^mexc:[A-Z0-9]{2,20}:(shadow|live)$/;
-export const BotIdSchema = z.string().regex(BOT_ID_RE, 'invalid bot id');
+import { BotIdSchema } from './bot-id';
+
+export { BOT_ID_RE, BotIdSchema } from './bot-id';
 
 /** Operator commands the engine understands (apps/worker EngineCommand). */
 export const EngineCommandSchema = z.enum(['pause', 'resume', 'reset_halt', 'reset_kill']);
@@ -32,3 +32,5 @@ export const CommandEnvelopeSchema = z.object({
 export type CommandEnvelope = z.infer<typeof CommandEnvelopeSchema>;
 
 export const commandStreamKey = (botId: string): string => `bot:${botId}:commands`;
+
+export * from './dashboard';

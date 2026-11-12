@@ -19,6 +19,8 @@ export const ApiConfigSchema = z
     API_COOKIE_SECURE: bool.default('true'),
     API_TRUST_PROXY: bool.default('false'),
     REDIS_URL: z.string().default('redis://127.0.0.1:6379'),
+    /** Built dashboard to serve from this origin (the image sets it); empty = API only. */
+    API_WEB_DIR: z.string().default(''),
   })
   .transform((c, ctx) => {
     const origin = new URL(c.API_ORIGIN);
@@ -56,6 +58,7 @@ export const ApiConfigSchema = z
       cookieSecure: c.API_COOKIE_SECURE,
       trustProxy: c.API_TRUST_PROXY,
       redisUrl: c.REDIS_URL,
+      webDir: c.API_WEB_DIR || undefined,
     };
   });
 
