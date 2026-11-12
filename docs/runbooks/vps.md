@@ -43,6 +43,38 @@ Depois:
 4. `/srv/cortex/repo/infra/prod/scripts/latency.sh` → anote os números em `docs/PROGRESS.md`.
 5. GHCR: na primeira vez, em github.com → Packages → `cortex-worker` e `cortex-migrate` → Package settings → **Public** (a imagem não contém segredos; o repositório já é público). Assim o VPS faz pull sem token.
 
+## 2b. API do operador (E5): login com Phantom + TOTP
+
+A API nunca vê chaves da corretora. Ela só autentica você e enfileira comandos (`pause`, `resume`, `reset_halt`, `reset_kill`) no stream do worker. O worker grava cada comando como input, então o replay continua bit-exato.
+
+1. **TOTP** (no PC, no repo): rode `npx tsx apps/api/src/provision.ts totp`.
+   - Cole o `otpauth://` no seu app autenticador (Aegis, 1Password, Google Authenticator).
+   - Coloque `API_TOTP_SECRET=…` no `cortex.env`.
+   - O segredo nunca vai para o git nem para o chat.
+2. **Carteira:** `API_ALLOWED_WALLETS=<seu endereço Phantom>`. O endereço é público, não é segredo; vários vão separados por vírgula.
+3. **Origem:** `API_ORIGIN=https://cortex-tokyo.<seu-tailnet>.ts.net`.
+4. **Discord (opcional):** `npx tsx apps/api/src/provision.ts service discord pause+read`.
+   - O token vai para o bot.
+   - A linha com o hash vai em `API_SERVICE_TOKENS`.
+   - Com isso, o bot pode pausar, mas nunca retomar.
+5. **Ativar:** `COMPOSE_PROFILES=api` no `cortex.env`, depois deploy.
+6. **HTTPS só no tailnet:** `sudo tailscale serve --bg --https=443 http://127.0.0.1:8080`. A porta 8080 fica presa no loopback do host.
+
+**Regras de segurança**, todas com teste em `apps/api/src/app.test.ts`:
+
+| Regra | Como funciona |
+|---|---|
+| Nonce | uso único, expira em 5 min, consumido antes de qualquer outra checagem |
+| Mensagem vinculada | o domínio, a URI e o horário da mensagem assinada também ficam presos ao nonce |
+| Allowlist | carteira fora dela é recusada, e a resposta não diz por quê (o motivo vai para o AuditLog) |
+| Sessão | cookie `httpOnly; Secure; SameSite=Strict`, válido por 12 h; o servidor guarda só o hash do token |
+| CSRF | comandos via cookie só são aceitos vindos da própria origem |
+| `pause` | só exige a sessão: parar sempre tem que ser fácil |
+| `resume` e `reset_*` | exigem TOTP de uso único, mesmo com duas requisições simultâneas; o worker recusa se o comando ficar parado mais de 2 min no stream |
+| Revogação | tirar a carteira da allowlist derruba as sessões dela na próxima requisição |
+| Rate limit | rotas de login: 10/min por IP; comandos: 30/min |
+| Auditoria | todo login, recusa e comando é gravado no `AuditLog` |
+
 ## 3. Escolher os pares (pré-registro)
 
 No VPS (ou no PC), **antes** de iniciar a janela de shadow:

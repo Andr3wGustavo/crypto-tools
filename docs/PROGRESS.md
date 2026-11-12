@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **55 / 100** (E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **60 / 100** (E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 core done (auth + commands), WS/metrics with E6; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -82,6 +82,38 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
   - **Reproduced:** only 232 of 60 000 records survived; after the fix, 60 000.
   - **Hidden by a second bug, now fixed:** the reader silently accepted a gzip without its trailer. It now checks ISIZE and reports `gzip trailer missing`. The check correctly flags the E3 segment killed with `taskkill /F`.
   - **Regression check:** the E3 digest is still `8437d0b77ddf…`.
+
+## E5 — API & Web3 auth → 64
+- ✅ `apps/api` (Fastify 5 + Zod). It **never holds exchange keys**. It authenticates the operator, audits, and enqueues commands; the worker stays the single writer.
+- ✅ **Sign-In With Solana**:
+  - Message format: wallet-standard `signIn`, the one Phantom uses.
+  - Parser: strict and canonical-only.
+  - Signature: Ed25519 via `node:crypto`, no crypto dependency.
+  - Nonce: single use, consumed before any other check; 5 min TTL; domain, URI and issue time all bound to it.
+  - Allowlist: checked last, and the response gives no reason. Nonces are issued to any address, so the API is no allowlist oracle.
+- ✅ **TOTP step-up** (RFC 6238, verified against the RFC 4226 and 6238 test vectors) for `resume` / `reset_halt` / `reset_kill`:
+  - single use, enforced atomically with `SET NX`;
+  - only steps newer than the last accepted one;
+  - `pause` needs no TOTP: stopping must always be easy.
+- ✅ **Sessions**: opaque 256-bit token; only its SHA-256 is stored, in Redis. Cookie is `httpOnly; Secure; SameSite=Strict`, TTL 12 h. Removing a wallet from the allowlist revokes its sessions.
+- ✅ **CSRF**: cookie writes must carry the dashboard `Origin`.
+- ✅ **Service tokens**: hashed and scoped. Discord gets `read+pause` only.
+- ✅ **Hardening**: rate limits, generic error bodies, `no-store` / `nosniff` / `no-referrer`, every decision written to the `AuditLog` table.
+- ✅ **Worker command intake** (`ops/command-source.ts`). Commands arrive on a Redis stream consumer group with XACK (at-least-once). A crash before the ack re-delivers the command.
+  - **Recording**: each command becomes a recorded engine input, so replay stays bit-exact.
+  - **Expiry**: `pause` applies even when stale; risky commands expire after 2 min.
+  - **Rejects**: malformed entries and entries for another bot are acked and refused.
+  - **Resilience**: Redis down means backoff plus an error count; the worker keeps running.
+- ✅ **Prod**: `api` image target, built and pushed by CI. Compose service under the `api` profile, bound to `127.0.0.1:8080` behind `tailscale serve`. Config validation refuses to boot on a bad origin, wallet or TOTP secret. A provisioning CLI handles the TOTP secret and service tokens.
+- ✅ **Evidence**:
+  - 27 API tests + 5 command-source tests.
+  - End-to-end test against a **real Redis** in CI: sign-in → pause + TOTP resume → applied in order, acked, outcomes published.
+  - Bundled API smoke on the dev PC: `/healthz` 200, `/readyz` 503 without Redis (degrades, no crash), unauthenticated command 401, security headers present.
+- ✅ **Fixed during E5 (caught by the tests)**:
+  - **TOTP rejected every code**: `\d` inside a template-literal `RegExp` became `d`, so the regex never matched a digit.
+  - **SIWS padding**: the parser accepted padded field values.
+  - **Event-loop starvation**: the command loop could starve the event loop with a non-blocking client.
+- ⬜ WebSocket snapshot + deltas for the dashboard, OpenAPI + typed client, `/metrics` (prom-client), and the `AuditLog` view (with E6)
 
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.
