@@ -33,40 +33,48 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: timescale/timescaledb:2.17.2-pg16
-        env:
-          POSTGRES_USER: cortex
-          POSTGRES_PASSWORD: ci
-          POSTGRES_DB: farm_shadow
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U cortex -d farm_shadow"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci
-      - run: npm run db:migrate:deploy
-        env:
-          DATABASE_URL: postgresql://cortex:ci@localhost:5432/farm_shadow
-
-  image:
-    # Multi-arch build of the worker image (arm64 = Oracle Ampere VPS). Pushing to GHCR is phase E4.
+        image:
+    # Multi-arch images (arm64 = Oracle Ampere VPS): worker runtime + one-shot migrate.
+    # Pushed to GHCR on pushes (tag = first 12 chars of the commit); PRs only build.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: check
+    timeout-minutes: 45
+    needs: [check, migrate]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+      - id: v
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: worker image
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/docker/worker.Dockerfile
+          target: runtime
           platforms: linux/amd64,linux/arm64
-          push: false
+          build-args: APP_VERSION=${{ steps.v.outputs.tag }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/andr3wgustavo/cortex-worker:${{ steps.v.outputs.tag }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/worker.Dockerfile
+          target: migrate
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/andr3wgustavo/cortex-migrate:${{ steps.v.outputs.tag }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha

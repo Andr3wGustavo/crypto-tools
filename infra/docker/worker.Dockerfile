@@ -23,20 +23,28 @@ COPY apps/worker ./apps/worker
 RUN npx prisma generate --schema packages/db/prisma/schema.prisma \
  && node scripts/build-worker.mjs
 
+# ---- migrate: one-shot `prisma migrate deploy` (the runtime image carries no Prisma CLI) --------
+FROM build AS migrate
+USER node
+CMD ["node", "node_modules/prisma/build/index.js", "migrate", "deploy", "--schema", "packages/db/prisma/schema.prisma"]
+
 # ---- runtime: bundle + Prisma client/engine + protos only ------------------------------------
 FROM ${NODE_IMAGE} AS runtime
+ARG APP_VERSION=dev
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates tini && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production \
     TRADING_MODE=shadow \
     MEXC_PROTO_DIR=/app/proto/mexc \
-    MARKET_DATA_DIR=/data/market
+    MARKET_DATA_DIR=/data/market \
+    HEARTBEAT_DIR=/data/health \
+    APP_VERSION=${APP_VERSION}
 COPY --from=build /app/dist/worker ./dist
 COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/packages/exchange/proto/mexc ./proto/mexc
 COPY --from=build /app/packages/db/prisma ./prisma
-RUN mkdir -p /data/market && chown -R node:node /data
+RUN mkdir -p /data/market /data/health && chown -R node:node /data
 USER node
 VOLUME ["/data"]
 # tini: PID 1 forwards SIGTERM so the worker drains and closes the recording cleanly.

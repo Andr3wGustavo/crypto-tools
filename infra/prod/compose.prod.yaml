@@ -1,0 +1,60 @@
+# Cortex Farm — production stack (VPS). No published ports: only containers on this network and
+# the host (via `docker compose exec`) reach Postgres/Redis; operators come in over Tailscale SSH.
+# Workers + dead-man are generated per pair in compose.pairs.yaml (see apps/worker/src/ops/pairs-cli.ts).
+#
+#   docker compose --env-file /srv/cortex/cortex.env -f compose.prod.yaml -f compose.pairs.yaml up -d --wait
+name: cortex-farm
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: cortex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /srv/cortex/cortex.env}
+      POSTGRES_DB: farm_shadow
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d farm_shadow"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    shm_size: 256mb
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options: { max-size: 20m, max-file: "3" }
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: cortex-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 320m
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  # One-shot schema migration, run by deploy.sh before the workers start (profile: not started by `up`).
+  migrate:
+    image: ghcr.io/andr3wgustavo/cortex-migrate:${IMAGE_TAG:?set IMAGE_TAG}
+    profiles: ["migrate"]
+    environment:
+      DATABASE_URL: postgresql://cortex:${POSTGRES_PASSWORD}@postgres:5432/farm_shadow
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
