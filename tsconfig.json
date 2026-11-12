@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": { "noEmit": true },
-  "include": ["packages/*/src/**/*.ts", "apps/worker/src/**/*.ts", "vitest.config.ts"],
+  "include": ["packages/*/src/**/*.ts", "apps/worker/src/**/*.ts", "apps/api/src/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "archive", "apps/sentinel"]
 }

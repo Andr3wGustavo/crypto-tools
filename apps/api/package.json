@@ -1,0 +1,17 @@
+{
+  "name": "@cortex/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Operator API: Sign-In With Solana (allowlist) + TOTP step-up, sessions in Redis, commands to the worker via a Redis stream, audit log. Never holds exchange keys.",
+  "main": "src/main.ts",
+  "dependencies": {
+    "@cortex/db": "*",
+    "@cortex/shared": "*",
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/rate-limit": "^11.2.2",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.12.8",
+    "ioredis": "^5.4.1",
+    "zod": "^3.23.8"
+  }
+}

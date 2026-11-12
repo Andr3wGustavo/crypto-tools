@@ -7,7 +7,10 @@ import { BinanceMarketStream, MexcMarketStream, MexcRest } from '@cortex/exchang
 import { loadConfig } from './config';
 import { engineConfigHash, stateDigest, type EngineOutput, type InputRecord, type ShadowEngineOptions } from './engine/shadow-engine';
 import { createLogger } from './logger';
+import Redis from 'ioredis';
+import { CommandSource } from './ops/command-source';
 import { heartbeatFile, writeHeartbeat } from './ops/heartbeat';
+import { IoRedisStreamClient } from './ops/redis-stream-client';
 import { NdjsonRecorder } from './recorder/ndjson';
 import { PostgresSink } from './sinks/postgres-sink';
 import { RedisSink } from './sinks/redis-sink';
@@ -161,6 +164,20 @@ async function main(): Promise<void> {
   mexc.start();
   binance.start();
 
+  // Operator commands: API → Redis stream → recorded engine input (replayable like market data).
+  // Optional: without Redis the bot runs unattended and still stops cleanly on SIGTERM.
+  let commandConn: Redis | undefined;
+  let commands: CommandSource | undefined;
+  if (cfg.REDIS_URL) {
+    commandConn = new Redis(cfg.REDIS_URL, { maxRetriesPerRequest: 1 }); // dedicated: XREADGROUP BLOCK holds it
+    commandConn.on('error', () => undefined); // counted by the command loop (onError) instead
+    commands = new CommandSource({
+      botId, client: new IoRedisStreamClient(commandConn), log, onError: noteError,
+      apply: (c) => handle({ t: 'command', ts: Date.now(), command: c.command }),
+    });
+    commands.start();
+  }
+
   const clock = setInterval(() => handle({ t: 'clock', ts: Date.now() }), 1_000);
 
   // Process health is an input too (recorded → replayable): event-loop lag, error rate, clock skew.
@@ -248,6 +265,9 @@ async function main(): Promise<void> {
     for (const t of [clock, health, resync, snapshots, status, heartbeat]) clearInterval(t);
     mexc.stop();
     binance.stop();
+    const stopCommands = commands?.stop();
+    commandConn?.disconnect(); // unblocks a waiting XREADGROUP; unacked commands are re-delivered next boot
+    await stopCommands;
     await recorder.close();
     let digest: string | undefined;
     let snapshot: string | undefined;
