@@ -1,6 +1,7 @@
 export * from './math/special';
 export * from './math/rng';
 export * from './stats/nig';
+export * from './stats/edge-protocol';
 export * from './stats/vol';
 export * from './quoting/tick';
 export * from './quoting/avellaneda';

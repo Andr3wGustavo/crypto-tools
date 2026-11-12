@@ -47,6 +47,11 @@ export interface EdgeGateConfig {
 /** Skeptical prior: zero edge, prior E[σ²] = β0/(α0−1) = 100 bps² (σ ≈ 10 bps). */
 export const DEFAULT_EDGE_PRIOR: NigPrior = { mu0: 0, kappa0: 1, alpha0: 2, beta0: 100 };
 
+/**
+ * Live per-pair indicator (dashboard, engine `edge` outputs): uncorrected, evaluated continuously.
+ * It is NOT the GO/NO-GO decision — that is the pre-registered multi-pair protocol in
+ * edge-protocol.ts (Bonferroni over pairs × looks, fixed looks, fail-closed).
+ */
 export const DEFAULT_EDGE_GATE: EdgeGateConfig = { minN: 168, goMinEdge: 1, goProb: 0.95, noGoProb: 0.05 };
 
 export class NigEstimator {

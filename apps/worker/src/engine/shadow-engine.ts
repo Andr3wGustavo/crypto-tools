@@ -105,6 +105,11 @@ export class ShadowEngine {
     return this.records;
   }
 
+  /** Start of the current edge window (read-only view for the evaluator; not part of any output). */
+  get edgeWindowStartTs(): number | undefined {
+    return this.windowStart?.ts;
+  }
+
   process(r: InputRecord): EngineOutput[] {
     const out: EngineOutput[] = [];
     this.records++;
