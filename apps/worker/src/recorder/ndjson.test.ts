@@ -73,6 +73,45 @@ describe('NdjsonRecorder crash safety', () => {
     await expect(readAll([bad])).rejects.toThrow();
   });
 
+  it('close() waits for rotated-out hours too: nothing is lost when the process drains right after a rotation', async () => {
+    const dir = tmp();
+    const rec = new NdjsonRecorder(dir, 'bot', { segment: 1 });
+    const n = 60_000; // enough to keep the first hour's gzip busy when the rotation happens
+    const pad = 'x'.repeat(40);
+    // A big hour then a tiny one: the tiny file finishes first, so waiting only for the current
+    // file would return while the big one is still being compressed and written.
+    for (let i = 0; i < n; i++) {
+      const ts = i < n - 10 ? T0 + Math.floor((i * H) / n) : T0 + H + i;
+      rec.write({ t: 'command', ts, command: 'pause', pad } as unknown as InputRecord);
+    }
+    await rec.close();
+    const notes: string[] = [];
+    const got = await readAll(listRecordings(path.join(dir, 'bot')), (f, d) => notes.push(`${path.basename(f)}: ${d}`));
+    expect(notes).toEqual([]);
+    expect(got).toHaveLength(n);
+  });
+
+  it('a file without its gzip trailer is reported, not read silently', async () => {
+    const dir = tmp();
+    const text = '{"t":"clock","ts":1}\n{"t":"clock","ts":2}\n';
+    const full = zlib.gzipSync(text);
+    const ok = path.join(dir, '10-0000000000001.ndjson.gz');
+    fs.writeFileSync(ok, full);
+    const notes: string[] = [];
+    expect(await readAll([ok], (_f, d) => notes.push(d))).toHaveLength(2);
+    expect(notes).toEqual([]);
+    // Same content, sync-flushed but never ended (what a crash or a still-open file looks like).
+    const z = zlib.createGzip();
+    const chunks: Buffer[] = [];
+    z.on('data', (c: Buffer) => chunks.push(c));
+    z.write(text);
+    await new Promise<void>((res) => z.flush(zlib.constants.Z_SYNC_FLUSH, () => res()));
+    const open = path.join(dir, '10-0000000000002.ndjson.gz');
+    fs.writeFileSync(open, Buffer.concat(chunks));
+    expect(await readAll([open], (_f, d) => notes.push(d))).toHaveLength(2);
+    expect(notes).toEqual(['gzip trailer missing: the file was not closed (crash, or still being written)']);
+  });
+
   it('reads legacy <HH>.ndjson.gz files (segment 0) before new segments of the same hour', () => {
     const dir = tmp();
     const day = path.join(dir, '2026-11-11');

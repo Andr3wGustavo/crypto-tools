@@ -38,6 +38,8 @@ export class NdjsonRecorder {
   private lastSha = '';
   private written = 0;
   private lastFlushTs = Number.NEGATIVE_INFINITY;
+  /** Rotated-out files still draining to disk: close() must wait for them too. */
+  private closing = new Set<Promise<void>>();
   private readonly root: string;
   private readonly segment: string;
   private readonly floorKey: string;
@@ -77,7 +79,7 @@ export class NdjsonRecorder {
   }
 
   private rotate(key: string): void {
-    this.stream?.end();
+    this.finishCurrent();
     const [day, hour] = key.split('/') as [string, string];
     const folder = path.join(this.root, day);
     fs.mkdirSync(folder, { recursive: true });
@@ -91,12 +93,27 @@ export class NdjsonRecorder {
     this.line = 0;
   }
 
-  close(): Promise<void> {
-    const f = this.file;
-    this.stream?.end();
+  /**
+   * Resolves when EVERY file this recorder wrote is complete on disk (gzip trailer included) —
+   * not only the current one: a rotated-out hour can still be draining when the process drains.
+   */
+  async close(): Promise<void> {
+    this.finishCurrent();
+    while (this.closing.size > 0) await Promise.all([...this.closing]);
+  }
+
+  private finishCurrent(): void {
+    const { stream, file } = this;
     this.stream = undefined;
     this.file = undefined;
-    return f ? new Promise((res) => f.on('close', () => res())) : Promise.resolve();
+    if (!stream || !file) return;
+    const done = new Promise<void>((res, rej) => {
+      file.once('close', () => res());
+      file.once('error', rej);
+      stream.once('error', rej);
+    }).finally(() => this.closing.delete(done));
+    this.closing.add(done);
+    stream.end();
   }
 }
 
@@ -122,6 +139,10 @@ export async function* readNdjsonLines(files: string[], onTruncated?: (file: str
   for (const f of files) {
     // Z_SYNC_FLUSH as finishFlush: decode everything that was flushed even without a gzip trailer.
     const gunzip = zlib.createGunzip({ finishFlush: zlib.constants.Z_SYNC_FLUSH });
+    let inflated = 0;
+    gunzip.on('data', (c: Buffer) => {
+      inflated += c.length;
+    });
     const rl = readline.createInterface({ input: fs.createReadStream(f).pipe(gunzip), crlfDelay: Infinity });
     let pending: string | undefined;
     let line = 0;
@@ -142,6 +163,24 @@ export async function* readNdjsonLines(files: string[], onTruncated?: (file: str
       }
       if (ok) yield { file: f, line: ++line, text: pending };
     }
+    if (!hasGzipTrailer(f, inflated)) onTruncated?.(f, 'gzip trailer missing: the file was not closed (crash, or still being written)');
+  }
+}
+
+/**
+ * A closed single-member gzip file ends with ISIZE = uncompressed size mod 2^32. A file cut by a
+ * crash (or still open) ends in compressed data instead: the check fails with probability 1 − 2^-32.
+ */
+function hasGzipTrailer(file: string, inflated: number): boolean {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size < 18) return false; // 10-byte header + 8-byte trailer
+    const tail = Buffer.alloc(4);
+    fs.readSync(fd, tail, 0, 4, size - 4);
+    return tail.readUInt32LE(0) === inflated % 2 ** 32;
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -180,6 +219,17 @@ function scan(dir: string): RecordingEntry[] {
   };
   walk(dir);
   return out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/**
+ * UTC time span covered by the recordings under `dir`, from the file names: [first hour, last hour + 1 h).
+ * Coarse (hour granularity) but needs no decompression; undefined when there are no recordings.
+ */
+export function recordingHourSpan(dir: string): { fromMs: number; toMs: number } | undefined {
+  const all = scan(dir);
+  if (all.length === 0) return undefined;
+  const ms = (e: RecordingEntry) => Date.parse(`${e.day}T${e.hour}:00:00Z`);
+  return { fromMs: Math.min(...all.map(ms)), toMs: Math.max(...all.map(ms)) + 3_600_000 };
 }
 
 /** All recordings under `dir`, ordered by (day, hour, segment). Legacy `<HH>.ndjson.gz` = segment 0. */
