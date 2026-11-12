@@ -10,6 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY apps/worker/package.json apps/worker/
+COPY apps/api/package.json apps/api/
 COPY apps/sentinel/package.json apps/sentinel/
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
@@ -20,6 +21,7 @@ COPY tsconfig.base.json tsconfig.json ./
 COPY scripts ./scripts
 COPY packages ./packages
 COPY apps/worker ./apps/worker
+COPY apps/api ./apps/api
 RUN npx prisma generate --schema packages/db/prisma/schema.prisma \
  && node scripts/build-worker.mjs
 
@@ -48,5 +50,21 @@ RUN mkdir -p /data/market /data/health && chown -R node:node /data
 USER node
 VOLUME ["/data"]
 # tini: PID 1 forwards SIGTERM so the worker drains and closes the recording cleanly.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "--enable-source-maps", "dist/main.js"]
+
+# ---- api: operator API (SIWS + TOTP, commands → worker stream). Never holds exchange keys. ----
+FROM ${NODE_IMAGE} AS api
+ARG APP_VERSION=dev
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates tini && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV NODE_ENV=production \
+    API_HOST=0.0.0.0 \
+    APP_VERSION=${APP_VERSION}
+COPY --from=build /app/dist/api ./dist
+COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
+COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+USER node
+EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "--enable-source-maps", "dist/main.js"]

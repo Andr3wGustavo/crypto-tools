@@ -55,6 +55,39 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
 
+  # Operator API — enable with COMPOSE_PROFILES=api in cortex.env once provisioned (docs/runbooks/vps.md).
+  # Published on the host loopback only; `tailscale serve` puts HTTPS on the tailnet in front of it.
+  # Values default to empty so the file interpolates without them; the API refuses to boot until set.
+  api:
+    image: ghcr.io/andr3wgustavo/cortex-api:${IMAGE_TAG:?set IMAGE_TAG}
+    container_name: cortex-api
+    profiles: ["api"]
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      API_PORT: "8080"
+      API_ORIGIN: ${API_ORIGIN:-}
+      API_ALLOWED_WALLETS: ${API_ALLOWED_WALLETS:-}
+      API_TOTP_SECRET: ${API_TOTP_SECRET:-}
+      API_SERVICE_TOKENS: ${API_SERVICE_TOKENS:-}
+      API_TRUST_PROXY: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://cortex:${POSTGRES_PASSWORD}@postgres:5432/farm_shadow?connection_limit=3
+    ports: ["127.0.0.1:8080:8080"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
 volumes:
   pgdata:
   redisdata:

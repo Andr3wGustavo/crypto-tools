@@ -13,6 +13,14 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      redis:
+        # Real Redis for the end-to-end command test (API → stream → worker).
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,6 +31,8 @@ jobs:
       - run: npm run db:generate
       - run: npm run typecheck
       - run: npx vitest run --coverage
+        env:
+          REDIS_TEST_URL: redis://localhost:6379
       - name: Validate Prisma schema
         run: npx prisma validate --schema packages/db/prisma/schema.prisma
         env:
@@ -84,6 +94,19 @@ jobs:
           build-args: APP_VERSION=${{ steps.v.outputs.tag }}
           push: ${{ github.event_name == 'push' }}
           tags: ghcr.io/andr3wgustavo/cortex-worker:${{ steps.v.outputs.tag }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/worker.Dockerfile
+          target: api
+          platforms: linux/amd64,linux/arm64
+          build-args: APP_VERSION=${{ steps.v.outputs.tag }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/andr3wgustavo/cortex-api:${{ steps.v.outputs.tag }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
