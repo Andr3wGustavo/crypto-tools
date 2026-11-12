@@ -88,6 +88,26 @@ services:
       driver: json-file
       options: { max-size: 10m, max-file: "3" }
 
+  # Alerter: halts, kills, divergences, dead feeds, drawdown and the daily digest → Discord.
+  # Always on: without ALERT_DISCORD_WEBHOOK it only logs (docs/runbooks/vps.md §2c).
+  alerter:
+    image: ghcr.io/andr3wgustavo/cortex-worker:${IMAGE_TAG:?set IMAGE_TAG}
+    container_name: cortex-alerter
+    restart: unless-stopped
+    command: ["node", "--enable-source-maps", "dist/alerter.js"]
+    depends_on:
+      redis: { condition: service_healthy }
+    environment:
+      REDIS_URL: redis://redis:6379
+      ALERT_DISCORD_WEBHOOK: ${ALERT_DISCORD_WEBHOOK:-}
+      ALERTER_HEALTHCHECK_URL: ${ALERTER_HEALTHCHECK_URL:-}
+      ALERT_DAILY_UTC_HOUR: ${ALERT_DAILY_UTC_HOUR:-11}
+      ALERT_SOURCE: ${ALERT_SOURCE:-cortex-tokyo}
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
 volumes:
   pgdata:
   redisdata:

@@ -21,6 +21,7 @@ await build({ ...common, entryPoints: ['apps/worker/src/main.ts'], outfile: 'dis
 await build({ ...common, entryPoints: ['apps/worker/src/replay.ts'], outfile: 'dist/worker/replay.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/scan.ts'], outfile: 'dist/worker/scan.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/deadman.ts'], outfile: 'dist/worker/deadman.js' });
+await build({ ...common, entryPoints: ['apps/worker/src/alerter-main.ts'], outfile: 'dist/worker/alerter.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/verify-run.ts'], outfile: 'dist/worker/verify-run.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/healthcheck.ts'], outfile: 'dist/worker/healthcheck.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/evaluate.ts'], outfile: 'dist/worker/evaluate.js' });

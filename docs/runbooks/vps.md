@@ -81,6 +81,26 @@ A API nunca vê chaves da corretora. Ela só autentica você e enfileira comando
 | Feed ao vivo (`/ws`) | só abre com sessão ou token `read`, e só vindo da própria origem; a sessão é revalidada a cada 30 s; o feed é só leitura |
 | CSP | `script-src 'self'`, sem `eval`, sem iframe (`frame-ancestors 'none'`); fontes e imagens só da própria origem |
 
+## 2c. Alertas no celular (modo AFK)
+
+O processo `alerter` sobe sempre junto com a farm. Ele avisa no Discord, e o app da Discord manda push para o seu celular.
+
+1. **Webhook:** num canal privado do seu servidor Discord, vá em Configurações do canal → Integrações → Webhooks → Novo webhook → Copiar URL.
+   - Coloque `ALERT_DISCORD_WEBHOOK=<url>` no `cortex.env`. A URL é **segredo**: quem tem a URL pode postar no canal.
+2. **(Opcional)** Crie um segundo check no healthchecks.io e coloque `ALERTER_HEALTHCHECK_URL`. Ele avisa se o próprio alerter cair.
+3. **Deploy.** A primeira mensagem é "Alerter online": é a prova de que está funcionando.
+
+| Alerta | Quando |
+|---|---|
+| 🔴 HALT, KILL, divergência de reconciliação | sempre, na hora; o bot já cancelou as ordens sozinho |
+| 🔴 sem dados / feed da MEXC parado | depois de 2 min; avisa de novo a cada 6 h enquanto durar, e 🟢 quando volta |
+| 🟠 pausa automática | só se durar mais de 60 s (um soluço de feed não vira spam) |
+| 🟠 drawdown ≥ 3%, rajada de erros (≥ 5 em 5 min) | uma vez quando começa, 🟢 quando passa |
+| 🟡 comandos | todo comando aplicado; 🟠 se recusado |
+| 🟡 resumo diário | 08:00 de Brasília (`ALERT_DAILY_UTC_HOUR=11`): variação de 24 h, fills e edge por bot |
+
+Quem vigia o quê: o **alerter** vigia os bots. O **dead-man** (healthchecks.io) vigia a máquina: se o VPS, o Docker ou o próprio alerter morrerem, as pings param e o healthchecks.io te avisa por e-mail ou pelo app.
+
 ## 3. Escolher os pares (pré-registro)
 
 No VPS (ou no PC), **antes** de iniciar a janela de shadow:

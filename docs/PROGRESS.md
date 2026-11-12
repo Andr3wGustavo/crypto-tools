@@ -147,6 +147,17 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
 - ⏸ **Proof per the plan**: live screenshots on the PC and the phone through Tailscale (needs the VPS, E4).
 - ⬜ Later (E7): Edge Lab, Simulator and Pair Scanner pages. Treasury on-chain (wallet balance, withdrawals with Solscan links) arrives with E9.
 
+## AFK operations (pulled forward, before E7)
+Priority is now the unattended farm. E7 (the Edge Lab, Simulator and Scanner pages) is not on its critical path; the official GO/NO-GO evaluator already exists as a CLI.
+- ✅ **Alerter** (`apps/worker/src/alerts/*`, `alerter-main.ts`, compose service `alerter`). It posts to a Discord webhook (push on the phone).
+  - **Events**: halt, kill, reconcile divergence, command applied or refused.
+  - **Conditions**: stale bot, dead MEXC feed, drawdown ≥ 3%, error burst, automatic pause lasting more than 60 s. Each is announced when it starts and when it clears, with a reminder every 6 h while it lasts.
+  - **Daily digest** at 08:00 BRT.
+  - **Reliability**: consumer group per bot stream (a restart resumes, at-least-once). The queue is bounded and batches 10 embeds per message, honours 429 `retry_after`, and never logs the webhook URL. Its own healthchecks ping means a dead alerter is noticed too.
+  - **Evidence**: 9 unit tests + 1 real-Redis integration test (CI). Bundle smoke with Redis down: it logs and backs off, no crash.
+  - **Bug caught by the tests**: drops that happened while a batch was in flight were lost from the "N dropped" notice.
+- ⬜ **E8 live execution** (next): MEXC user-data stream, a live executor with the simulator's contract, reconciliation against the exchange, crash recovery by clientOrderId, cancel-all on boot and shutdown. Still refused until the GO.
+
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.
 - **First real scan** (2026-11-12 10:24 UTC, 20 min, 240 whole-market samples, 0 failures, from the dev PC): 1 790 symbols → 64 pass the static gates → 32 eligible → top 8 = IO, KAITO, BONK, ZRO, CRV, TAO, QNT, W. The majors are untradeable for a penny-inside maker on MEXC (SOL/ETH/XRP/DOGE/ADA: 1-tick spread; BTC: 14 ticks but 0.01 bps). The eligible pairs quote **15–100 bps wide on MEXC while Binance is tight**, often with a −10…−30 bps basis: MEXC is the lagging venue, so much of its flow is likely arbitrage against stale quotes (adverse selection). That is exactly what the lead-lag toxicity filter and the conservative simulator have to survive: **a wide spread is an opportunity only if the shadow says so**. The ranking changed a lot between a 30 s smoke and the 20 min scan (3 of 8 overlap) ⇒ the pre-registration scan on the VPS uses 60 min.
