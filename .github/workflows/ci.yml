@@ -33,7 +33,27 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image:
+        image: timescale/timescaledb:2.17.2-pg16
+        env:
+          POSTGRES_USER: cortex
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: farm_shadow
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cortex -d farm_shadow"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run db:migrate:deploy
+        env:
+          DATABASE_URL: postgresql://cortex:ci@localhost:5432/farm_shadow
+
+  image:
     # Multi-arch images (arm64 = Oracle Ampere VPS): worker runtime + one-shot migrate.
     # Pushed to GHCR on pushes (tag = first 12 chars of the commit); PRs only build.
     runs-on: ubuntu-latest
