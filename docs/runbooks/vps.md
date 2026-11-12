@@ -50,11 +50,35 @@ No VPS (ou no PC), **antes** de iniciar a janela de shadow:
 ```bash
 docker run --rm -v /srv/cortex/data:/data ghcr.io/andr3wgustavo/cortex-worker:<tag> \
   node dist/scan.js --minutes 60 --every 5000 --top 8 --out /data/scans
-npx tsx apps/worker/src/ops/pairs-cli.ts <scan.json>      # no PC, no repo
-git add infra/prod/pairs.json infra/prod/compose.pairs.yaml && git commit && git push
+npx tsx apps/worker/src/ops/pairs-cli.ts <scan.json>      # no PC, no repo (recusa se o core/engine tiver mudança não commitada)
+git add infra/prod/pairs.json infra/prod/compose.pairs.yaml infra/prod/protocol.json && git commit && git push
 ```
 
-O commit é o pré-registro: a seleção e o `paramsHash` do scanner ficam datados **antes** dos dados que vão julgá-los. Os pares não são trocados durante a janela (trocar = nova janela).
+O commit é o pré-registro. A seleção, o `paramsHash` do scanner e o **protocolo de GO/NO-GO** (`protocol.json`) ficam datados **antes** dos dados que vão julgá-los. O protocolo fixa:
+- os pares (m);
+- a regra (`DEFAULT_EDGE_PROTOCOL_RULE`);
+- o instante de registro;
+- o **fingerprint do código julgado**: hash do conteúdo de `packages/core/src` + `apps/worker/src/engine`, sem os testes e sem diferença de CRLF.
+
+O arquivo tem hash, então qualquer edição posterior é detectada. Os pares não são trocados durante a janela (trocar = nova janela).
+
+### A regra (master plan §3.6, fechada antes da janela)
+
+| Item | Valor |
+|---|---|
+| Observação | retorno MTM do equity por janela de 1 h, em bps (inventário incluído, sem viés de sobrevivência) |
+| Olhadas | **só** em 7, 14 e 21 dias, cada uma sobre exatamente o seu intervalo (rodar o avaliador mais vezes não muda nada) |
+| GO do par i | P(μᵢ > 1 bp/h) ≥ 1 − 0,05/(m·3) **e** ≥ 300 fills na olhada |
+| NO-GO antecipado | P(μᵢ > 0) < 5% (futilidade) |
+| Autocorrelação | variância inflada por (1+ρ)/(1−ρ) quando ρ > 0 (o inventário carrega de uma hora para a outra) |
+| Qualidade | olhada com > 5% do tempo sem dados não decide; na última olhada, tudo que não é GO vira NO-GO |
+| Par sem dados | NO-GO após registro + 21 dias + 24 h |
+| Troca de config na janela | violação ⇒ NO-GO daquele par |
+| Live D1 | o par GO com o maior limite inferior corrigido |
+
+Garantia (testada por simulação em `edge-protocol.test.ts`): a chance de **algum** par ser declarado GO, em **alguma** olhada, quando nenhum tem edge acima de 1 bp/h, é ≤ 5%. Medido: 1,7% com 8 pares; **sem a correção seria 28%**. Com inventário autocorrelacionado (ρ = 0,5): 4,5% com o ajuste e 20% sem ele.
+
+O que a janela consegue provar, com σ ≈ 10 bps/h e 8 pares: um GO na 1ª olhada precisa de média ≈ 3,2 bps/h, e na 3ª de ≈ 2,3 bps/h (`minimumDetectableEdge`). Edges reais mas menores que isso terminam em NO-GO. **Isso é proposital**: protege o capital, a um custo de US$0.
 
 ## 4. Deploy
 
@@ -83,6 +107,15 @@ Regra para migrations: só **aditivas** (expand/contract). Assim o rollback de c
 2. **Rollback**: dispare o deploy de uma tag cujo worker não fica saudável (ex.: uma build com `HEARTBEAT_EVERY_MS=600000`) → o script tem que voltar à tag anterior sozinho, com os workers saudáveis.
 3. **Caos**: `docker kill -s KILL cortex-worker-<par>` → o restart restaura do snapshot (logs: `engine restored`), e o digest bate com o `verify-run`. Reinicie o VPS (`sudo reboot`) → tudo volta sozinho (`restart: unless-stopped`). Corte a rede de um container (`docker network disconnect`) → o dead-man acusa em ≤ 5 min.
 4. **24 h sem intervenção**: o healthchecks.io sem nenhum alerta por 24 h, com os N pares gravando.
+
+## 6b. Avaliação oficial de GO/NO-GO (E7/E10)
+
+```bash
+docker run --rm -v /srv/cortex/data:/data:ro -v /srv/cortex/repo/infra/prod:/proto:ro ghcr.io/andr3wgustavo/cortex-worker:<tag> \
+  node dist/evaluate.js /proto/protocol.json --data /data/market --as-of "$(date -u +%FT%TZ)" > evaluation.json
+```
+
+O avaliador refaz o replay de cada par com o código da imagem (determinístico: mesmas entradas ⇒ mesmas decisões do shadow) e aplica o protocolo. O resultado só é **oficial** (exit 0, `"official": true`) se o fingerprint do código da imagem for o registrado. Caso contrário, exit 3. Leva até ~1,5 h por par em 21 dias (cerca de 13 mil registros/s). O aviso `gzip trailer missing` no arquivo da hora atual é esperado: o worker ainda está gravando nele.
 
 ## 7. Incidentes
 
