@@ -55,6 +55,8 @@ export class MarketMakerStrategy {
   private haltRule: string | undefined;
   private riskPaused = false;
   private reduceOnly = false;
+  /** Live only (see StrategyEvent 'venue'); always null in shadow. */
+  private venueHold: string | null = null;
 
   private localBook: (BookTop & { ts: number }) | undefined;
   private lastFair = 0;
@@ -122,6 +124,9 @@ export class MarketMakerStrategy {
       case 'command':
         this.onCommand(e.ts, e.command, out);
         break;
+      case 'venue':
+        this.onVenue(e.ts, e.hold, out);
+        break;
     }
     return out;
   }
@@ -155,7 +160,7 @@ export class MarketMakerStrategy {
   private onOrder(e: Extract<StrategyEvent, { kind: 'order' }>, out: StrategyAction[]): void {
     const o = this.orders.get(e.clientOrderId);
     if (!o) return;
-    const ev = e.status === 'NEW' ? 'ack' : e.status === 'CANCELED' ? 'canceled' : e.status === 'REJECTED' ? 'rejected' : 'expired';
+    const ev = e.status === 'NEW' ? 'ack' : e.status === 'CANCELED' ? 'canceled' : e.status === 'REJECTED' ? 'rejected' : e.status === 'UNKNOWN' ? 'timeout' : 'expired';
     try {
       o.status = nextStatus(o.status, ev);
     } catch (err) {
@@ -209,6 +214,13 @@ export class MarketMakerStrategy {
       this.peakEquity = this.startEquity;
       this.setStatus(ts, 'paused', 'manual_reset_kill', out);
     }
+    this.quote(ts, out, true);
+  }
+
+  private onVenue(ts: number, hold: string | null, out: StrategyAction[]): void {
+    if (hold === this.venueHold) return;
+    this.venueHold = hold;
+    out.push({ kind: 'status', ts, status: this.status, quoting: this.canQuote(), reason: hold === null ? 'venue_ok' : `venue_hold:${hold}` });
     this.quote(ts, out, true);
   }
 
@@ -269,7 +281,7 @@ export class MarketMakerStrategy {
   }
 
   private canQuote(): boolean {
-    return this.status === 'running' && !this.riskPaused;
+    return this.status === 'running' && !this.riskPaused && this.venueHold === null;
   }
 
   // ------------------------------------------------------------------ quoting
@@ -305,7 +317,8 @@ export class MarketMakerStrategy {
     let quoteLocked = 0;
     let baseLocked = 0;
     for (const o of this.orders.values()) {
-      if (o.status !== 'CANCEL_REQ') continue;
+      // Pending cancel, or unknown (live): may still rest on the book, so its funds are not free.
+      if (o.status !== 'CANCEL_REQ' && o.status !== 'UNKNOWN') continue;
       const rem = o.qty - o.filled;
       if (o.side === 'BUY') quoteLocked += rem * o.price;
       else baseLocked += rem;
@@ -366,7 +379,8 @@ export class MarketMakerStrategy {
   /** Keep, replace (cancel now, re-place after the cancel is confirmed) or place the order on one side. */
   private reconcileSide(ts: number, side: Side, target: OrderTarget | undefined, out: StrategyAction[]): void {
     const onSide = [...this.orders.values()].filter((o) => o.side === side);
-    if (onSide.some((o) => o.status === 'CANCEL_REQ')) return; // never double-expose while a cancel is in flight
+    // Never double-expose while a cancel is in flight, or while an order's state is unknown (live).
+    if (onSide.some((o) => o.status === 'CANCEL_REQ' || o.status === 'UNKNOWN')) return;
     const current = onSide[0];
     if (!target) {
       if (current) this.cancel(ts, current, 'no_target', out);
@@ -389,7 +403,9 @@ export class MarketMakerStrategy {
   }
 
   private cancel(ts: number, o: WorkingOrder, reason: string, out: StrategyAction[]): void {
-    if (o.status === 'CANCEL_REQ') return;
+    // UNKNOWN (live): there is no order we know of to cancel; the live engine queries it and the
+    // venue-level cancel-all / reconciler removes it if it does rest.
+    if (o.status === 'CANCEL_REQ' || o.status === 'UNKNOWN') return;
     o.status = nextStatus(o.status, 'cancel_request');
     out.push({ kind: 'cancel', ts, clientOrderId: o.clientOrderId, reason });
   }
@@ -400,12 +416,19 @@ export class MarketMakerStrategy {
 
   // ------------------------------------------------------------------ introspection
 
+  /** One working order (copy), for the live engine's mapping of exchange events. */
+  workingOrder(clientOrderId: string): Readonly<WorkingOrder> | undefined {
+    const o = this.orders.get(clientOrderId);
+    return o ? { ...o } : undefined;
+  }
+
   snapshot() {
     return {
       status: this.status,
       quoting: this.canQuote(),
       haltRule: this.haltRule,
       reduceOnly: this.reduceOnly,
+      venueHold: this.venueHold,
       fair: this.lastFair,
       mid: this.lastMid,
       quoteTotal: this.quoteTotal,

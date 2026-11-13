@@ -18,6 +18,13 @@ const viaJson = (s: EngineSnapshot): EngineSnapshot => JSON.parse(JSON.stringify
 const meta = { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 }, edgeWindowMs: 10 * 60_000 };
 
 describe('ShadowEngine', () => {
+  it('golden: shadow decisions are frozen (any change here is a new experiment, not a refactor)', () => {
+    // Pinned before the E8 live work; also holds on the real E3 recording (output hash febef904…).
+    const { hash, engine } = runHash(inputs(60));
+    expect(engine.fillCount).toBe(78);
+    expect(hash).toBe('90fbc0c28c831d33678fb93421ed92d9611ea640b179d3a186e448b2ffe7c8b8');
+  });
+
   it('replay is bit-exact, including through the gzip NDJSON recorder', async () => {
     const recs = inputs(30);
     const a = runHash(recs);

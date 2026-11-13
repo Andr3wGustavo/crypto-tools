@@ -33,8 +33,17 @@ export interface ShadowEngineOptions {
   edgeWindowMs?: number;
 }
 
-/** Bump when the engine's state shape or semantics change: old snapshots are then ignored. */
-export const ENGINE_STATE_VERSION = 1;
+/**
+ * Two different versions, on purpose:
+ *  - BEHAVIOR: part of the experiment identity (config hash). Bump only when the decisions the
+ *    engine makes from the same inputs change. Bumping it orphans every recording's run dir.
+ *  - STATE: snapshot shape. Bump when the captured state changes; old snapshots are then ignored
+ *    at boot (genesis replay), recordings stay valid.
+ * v2 state (E8): the strategy gained `venueHold` (live only, always null in shadow). Shadow
+ * outputs are unchanged: the E3 recording still replays to output hash febef904….
+ */
+export const ENGINE_BEHAVIOR_VERSION = 1;
+export const ENGINE_STATE_VERSION = 2;
 
 /** Everything needed to resume the engine exactly where it stopped. */
 export interface EngineSnapshot {
@@ -49,7 +58,7 @@ export interface EngineSnapshot {
 /** Identity of an experiment: same hash ⇔ same pre-registered parameters and simulator. */
 export function engineConfigHash(o: ShadowEngineOptions): string {
   const id = {
-    v: ENGINE_STATE_VERSION, config: o.config, startQuote: o.startQuote, latencyMs: o.latencyMs,
+    v: ENGINE_BEHAVIOR_VERSION, config: o.config, startQuote: o.startQuote, latencyMs: o.latencyMs,
     makerFeeRate: o.makerFeeRate, timerMs: o.timerMs ?? 1_000, edgeWindowMs: o.edgeWindowMs ?? 3_600_000,
   };
   return crypto.createHash('sha256').update(canonicalJson(id)).digest('hex');

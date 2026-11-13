@@ -21,14 +21,20 @@ describe('NdjsonRecorder crash safety', () => {
     const dir = tmp();
     const rec = new NdjsonRecorder(dir, 'bot', { segment: 1, flushEveryMs: 1_000 });
     for (let i = 0; i < 50; i++) rec.write({ t: 'clock', ts: T0 + i * 1_000 });
-    await new Promise((r) => setTimeout(r, 50)); // let the flushed bytes reach the file
-    const [file] = listRecordings(dir);
-    // Simulate SIGKILL: copy the file as it is on disk right now, without closing the recorder.
-    const crashed = path.join(dir, 'bot', 'crashed');
-    fs.mkdirSync(crashed);
-    fs.copyFileSync(file!, path.join(crashed, '10-0000000000001.ndjson.gz'));
+    // Simulate SIGKILL: copy the file as it is on disk, without closing the recorder. The flushed
+    // bytes reach the file asynchronously, so poll (bounded) instead of guessing a delay: a fixed
+    // sleep was flaky under a loaded test run.
+    const copy = path.join(tmp(), '10-0000000000001.ndjson.gz'); // outside the recorder's tree
+    let got: Awaited<ReturnType<typeof readAll>> = [];
+    let file: string | undefined;
+    for (const end = Date.now() + 5_000; Date.now() < end; await new Promise((r) => setTimeout(r, 25))) {
+      file = listRecordings(dir)[0];
+      if (!file) continue;
+      fs.copyFileSync(file, copy);
+      got = await readAll([copy]);
+      if (got.length >= 49) break;
+    }
     expect(() => zlib.gunzipSync(fs.readFileSync(file!))).toThrow(); // really truncated (no trailer)
-    const got = await readAll([path.join(crashed, '10-0000000000001.ndjson.gz')]);
     expect(got.length).toBeGreaterThanOrEqual(49);
     expect(got.map((r) => r.ts)).toEqual(got.map((_, i) => T0 + i * 1_000));
     await rec.close();

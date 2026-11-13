@@ -176,3 +176,70 @@ describe('MarketMakerStrategy (closed loop on a synthetic market)', () => {
     expect(s.snapshot().status).toBe('running');
   });
 });
+
+describe('live hooks: venue hold and unknown order state (never exercised in shadow)', () => {
+  /** Strategy with a quoting book and both sides acknowledged on the venue. */
+  function quoting() {
+    // Inventory on hand so both sides quote; caps raised so the fixture is not in reduce-only.
+    const cfg = makeConfig({ maxInventoryFraction: 0.6 });
+    const s = new MarketMakerStrategy({ ...cfg, risk: { ...cfg.risk, maxInventoryNotional: 10 } }, { quote: 15, base: 0.03 });
+    const all: StrategyAction[] = [];
+    const h = (e: StrategyEvent) => {
+      const a = s.handle(e);
+      all.push(...a);
+      return a;
+    };
+    for (let i = 0; i < 40; i++) h({ kind: 'book', venue: 'local', ts: 1_000 + i * 250, bid: 150, bidQty: 5, ask: 150.1, askQty: 5 });
+    h({ kind: 'timer', ts: 12_000 });
+    for (const o of s.snapshot().workingOrders) h({ kind: 'order', ts: 12_001, clientOrderId: o.clientOrderId, status: 'NEW' });
+    return { s, h, all };
+  }
+
+  it('a venue hold cancels everything and blocks quoting until released', () => {
+    const { s, h } = quoting();
+    const working = s.snapshot().workingOrders;
+    expect(working.map((o) => o.side).sort()).toEqual(['BUY', 'SELL']);
+    const out = h({ kind: 'venue', ts: 12_100, hold: 'stream_down' });
+    expect(out.find((a) => a.kind === 'status')).toMatchObject({ status: 'running', quoting: false, reason: 'venue_hold:stream_down' });
+    expect(out.filter((a) => a.kind === 'place')).toEqual([]);
+    const pending = s.snapshot().workingOrders;
+    expect(pending.length).toBeGreaterThan(0);
+    expect(pending.every((o) => o.status === 'CANCEL_REQ')).toBe(true); // every order asked to cancel
+    for (const o of pending) h({ kind: 'order', ts: 12_200, clientOrderId: o.clientOrderId, status: 'CANCELED' });
+    expect(s.snapshot().workingOrders).toEqual([]);
+    // Fresh book, then a timer so the risk check sees it (a stale book is its own risk pause).
+    const later = [h({ kind: 'book', venue: 'local', ts: 20_001, bid: 150, bidQty: 5, ask: 150.1, askQty: 5 }), h({ kind: 'timer', ts: 20_050 })].flat();
+    expect(later.filter((a) => a.kind === 'place')).toEqual([]);
+    expect(h({ kind: 'venue', ts: 20_100, hold: 'stream_down' })).toEqual([]); // idempotent
+    const back = h({ kind: 'venue', ts: 20_200, hold: null });
+    expect(back.find((a) => a.kind === 'status')).toMatchObject({ quoting: true, reason: 'venue_ok' });
+    expect(back.filter((a) => a.kind === 'place').map((a) => (a as { side: string }).side).sort()).toEqual(['BUY', 'SELL']);
+    expect(s.snapshot().venueHold).toBeNull();
+  });
+
+  it('an UNKNOWN order freezes its side (no new quote, no cancel) until the exchange resolves it', () => {
+    const { s, h } = quoting();
+    const bid = s.snapshot().workingOrders.find((o) => o.side === 'BUY')!;
+    h({ kind: 'order', ts: 12_300, clientOrderId: bid.clientOrderId, status: 'UNKNOWN' });
+    expect(s.workingOrder(bid.clientOrderId)?.status).toBe('UNKNOWN');
+    // A large price move would normally reprice the bid: with UNKNOWN it must not touch that side.
+    const moved = [12_400, 12_700, 13_000, 14_000].flatMap((ts) => h({ kind: 'book', venue: 'local', ts, bid: 149, bidQty: 5, ask: 149.1, askQty: 5 }));
+    const bidActions = moved.filter((a) => (a.kind === 'place' || a.kind === 'cancel') && (a.kind === 'cancel' ? a.clientOrderId === bid.clientOrderId : a.side === 'BUY'));
+    expect(bidActions).toEqual([]);
+    expect(moved.filter((a) => a.kind === 'error')).toEqual([]);
+    // Resolved as canceled → the side quotes again.
+    const again = [h({ kind: 'order', ts: 14_100, clientOrderId: bid.clientOrderId, status: 'CANCELED' }), h({ kind: 'timer', ts: 16_000 })].flat();
+    expect(again.some((a) => a.kind === 'place' && a.side === 'BUY')).toBe(true);
+  });
+
+  it('an UNKNOWN order that turns out to be resting goes back to NEW; one that filled becomes FILLED', () => {
+    const { s, h } = quoting();
+    const [a, b] = s.snapshot().workingOrders;
+    h({ kind: 'order', ts: 12_300, clientOrderId: a!.clientOrderId, status: 'UNKNOWN' });
+    h({ kind: 'order', ts: 12_400, clientOrderId: a!.clientOrderId, status: 'NEW' });
+    expect(s.workingOrder(a!.clientOrderId)?.status).toBe('NEW');
+    h({ kind: 'order', ts: 12_500, clientOrderId: b!.clientOrderId, status: 'UNKNOWN' });
+    h({ kind: 'fill', ts: 12_600, clientOrderId: b!.clientOrderId, fillId: 't1', side: b!.side, price: b!.price, qty: b!.qty, fee: 0, feeAsset: 'quote' });
+    expect(s.workingOrder(b!.clientOrderId)).toBeUndefined();
+  });
+});

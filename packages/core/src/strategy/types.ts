@@ -42,12 +42,19 @@ export interface BookEvent {
 
 export type StrategyEvent =
   | BookEvent
-  | { kind: 'order'; ts: number; clientOrderId: string; status: 'NEW' | 'CANCELED' | 'REJECTED' | 'EXPIRED'; reason?: string }
+  /** UNKNOWN (live only): the outcome of a request is unknown; the side is frozen until resolved. */
+  | { kind: 'order'; ts: number; clientOrderId: string; status: 'NEW' | 'CANCELED' | 'REJECTED' | 'EXPIRED' | 'UNKNOWN'; reason?: string }
   | { kind: 'fill'; ts: number; clientOrderId: string; fillId: string; side: Side; price: number; qty: number; fee: number; feeAsset: 'quote' | 'base' }
   | { kind: 'timer'; ts: number }
   | { kind: 'health'; ts: number; errorsLastMin: number; eventLoopLagMs: number; clockSkewMs: number; reconcileDiverged: boolean }
   | { kind: 'balances'; ts: number; quote: number; base: number }
-  | { kind: 'command'; ts: number; command: 'pause' | 'resume' | 'reset_halt' | 'reset_kill' };
+  | { kind: 'command'; ts: number; command: 'pause' | 'resume' | 'reset_halt' | 'reset_kill' }
+  /**
+   * Live only: the venue cannot be trusted right now (user stream down, re-syncing, rate limited,
+   * clock, auth). Non-null ⇒ cancel everything and do not quote; null ⇒ quote again. Never sent
+   * in shadow, so shadow behaviour is unchanged.
+   */
+  | { kind: 'venue'; ts: number; hold: string | null };
 
 export type BotStatus = 'running' | 'paused' | 'halted' | 'killed';
 
