@@ -60,8 +60,8 @@ export class SnapshotStore {
   }
 }
 
-export interface BootResult {
-  engine: ShadowEngine;
+export interface BootResult<E = ShadowEngine> {
+  engine: E;
   from: 'snapshot' | 'genesis';
   snapshot?: string;
   /** Records replayed on top of the snapshot (or from genesis). */
@@ -79,9 +79,27 @@ export interface BootResult {
  * is rebuilt from genesis (the recordings are the source of truth; snapshots only save time).
  * Because the engine is deterministic, the result equals one uninterrupted run over the same records.
  */
-export async function bootEngine(opts: ShadowEngineOptions, root: string, store: SnapshotStore): Promise<BootResult> {
+export function bootEngine(opts: ShadowEngineOptions, root: string, store: SnapshotStore): Promise<BootResult> {
+  return bootAny<ShadowEngine, InputRecord>({
+    configHash: engineConfigHash(opts), stateVersion: ENGINE_STATE_VERSION,
+    create: () => new ShadowEngine(opts), restore: (s) => ShadowEngine.restore(opts, s),
+  }, root, store);
+}
+
+/** How to build, restore and identify one kind of engine (shadow or live). */
+export interface EngineKind<E extends { process(r: R): unknown }, R> {
+  configHash: string;
+  stateVersion: number;
+  create(): E;
+  restore(s: EngineSnapshot): E;
+  /** Marker type only (records are JSON-parsed as R). */
+  readonly record?: R;
+}
+
+/** Same algorithm for every engine kind: newest valid snapshot + tail, else genesis replay. */
+export async function bootAny<E extends { process(r: R): unknown }, R>(kind: EngineKind<E, R>, root: string, store: SnapshotStore): Promise<BootResult<E>> {
   const files = listRecordings(root);
-  const hash = engineConfigHash(opts);
+  const hash = kind.configHash;
   const rejected: string[] = [];
   const truncated: string[] = [];
   const reject = (name: string, why: string) => {
@@ -98,7 +116,7 @@ export async function bootEngine(opts: ShadowEngineOptions, root: string, store:
       reject(name, `unreadable (${(err as Error).message})`);
       continue;
     }
-    if (snap.engine?.v !== ENGINE_STATE_VERSION || snap.engine.configHash !== hash) {
+    if (snap.engine?.v !== kind.stateVersion || snap.engine.configHash !== hash) {
       reject(name, 'different engine version or configuration');
       continue;
     }
@@ -112,9 +130,9 @@ export async function bootEngine(opts: ShadowEngineOptions, root: string, store:
       reject(name, `cursor file ${cursor.file} not found`);
       continue;
     }
-    let engine: ShadowEngine;
+    let engine: E;
     try {
-      engine = ShadowEngine.restore(opts, snap.engine);
+      engine = kind.restore(snap.engine);
     } catch (err) {
       reject(name, `restore failed (${(err as Error).message})`);
       continue;
@@ -133,7 +151,7 @@ export async function bootEngine(opts: ShadowEngineOptions, root: string, store:
         verified = true;
         continue;
       }
-      engine.process(JSON.parse(l.text) as InputRecord);
+      engine.process(JSON.parse(l.text) as R);
       replayed++;
     }
     if (!verified) {
@@ -143,10 +161,10 @@ export async function bootEngine(opts: ShadowEngineOptions, root: string, store:
     return { engine, from: 'snapshot', snapshot: name, replayed, rejected, truncated };
   }
 
-  const engine = new ShadowEngine(opts);
+  const engine = kind.create();
   let replayed = 0;
   for await (const l of readNdjsonLines(files, onTruncated)) {
-    engine.process(JSON.parse(l.text) as InputRecord);
+    engine.process(JSON.parse(l.text) as R);
     replayed++;
   }
   return { engine, from: 'genesis', replayed, rejected, truncated };

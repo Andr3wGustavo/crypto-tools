@@ -1,3 +1,4 @@
+import { BN } from '@cortex/core';
 import { LiveExecutor, mexcMyTradeToExec, type ExecEvent, type MexcMyTrade, type MexcOrderRaw, type OrderApi, type UserStreamState } from '@cortex/exchange';
 import type { LiveEngine, LiveInputRecord, LiveOutput } from './live-engine';
 
@@ -25,6 +26,21 @@ export interface LiveSessionOptions {
   /** Own trades fetched on every sync, looking back this far (deduplicated by the ledger). */
   tradesLookbackMs?: number;
   cancelAllAttempts?: number;
+  /**
+   * Rollout step 1 ("paper on the real API"): every order is sent this many bps away from the
+   * strategy's price (BUY lower, SELL higher, rounded away from the market to `tickSize`), so it
+   * rests but never fills. Only the price sent changes: the engine and the recording are the same.
+   */
+  paper?: { offsetBps: number; tickSize: string };
+}
+
+/** Price moved `bps` away from the market and rounded outward to the tick (never toward it). */
+export function paperPrice(side: 'BUY' | 'SELL', price: string, bps: number, tickSize: string): string {
+  const f = side === 'BUY' ? 1 - bps / 1e4 : 1 + bps / 1e4;
+  const ticks = new BN(price).times(f).div(tickSize).integerValue(side === 'BUY' ? BN.ROUND_FLOOR : BN.ROUND_CEIL);
+  const out = ticks.times(tickSize);
+  if (!out.gt(0)) throw new RangeError(`paper price for ${side} ${price} is not positive`);
+  return out.toFixed();
 }
 
 /**
@@ -116,7 +132,11 @@ export class LiveSession {
     if (o.kind === 'action') {
       const a = o.action;
       if (this.stopped) return;
-      if (a.kind === 'place') this.executor.place({ clientOrderId: a.clientOrderId, side: a.side, price: a.price, qty: a.qty });
+      if (a.kind === 'place') {
+        const p = this.o.paper;
+        const price = p && p.offsetBps > 0 ? paperPrice(a.side, a.price, p.offsetBps, p.tickSize) : a.price;
+        this.executor.place({ clientOrderId: a.clientOrderId, side: a.side, price, qty: a.qty });
+      }
       else if (a.kind === 'cancel') this.executor.cancel(a.clientOrderId);
       return;
     }

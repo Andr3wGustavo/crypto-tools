@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **72 / 100** (E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **81 / 100** (E8 live execution built and tested, gated closed until GO; its real-API rollout waits on the MEXC trade key + VPS; E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -157,6 +157,32 @@ Priority is now the unattended farm. E7 (the Edge Lab, Simulator and Scanner pag
   - **Evidence**: 9 unit tests + 1 real-Redis integration test (CI). Bundle smoke with Redis down: it logs and backs off, no crash.
   - **Bug caught by the tests**: drops that happened while a batch was in flight were lost from the "N dropped" notice.
 - ⬜ **E8 live execution** (next): MEXC user-data stream, a live executor with the simulator's contract, reconciliation against the exchange, crash recovery by clientOrderId, cancel-all on boot and shutdown. Still refused until the GO.
+
+## E8 — Live execution (built, gated) → target 90
+
+Everything needed to trade for real is built and tested. Live stays **closed** until the GO and the operator's `LIVE_ACK` (design + decisions: [E8-DESIGN.md](E8-DESIGN.md)).
+
+- ✅ MEXC user data stream: listenKey lifecycle, confirmed private subscriptions, gaps signalled (8 tests against a local WS server).
+- ✅ REST failure semantics: rejected / rate_limited / auth / clock / unknown. An unknown outcome is never guessed.
+- ✅ LiveExecutor: rate limit, per-order ordering, cancel retries, Retry-After (12 tests).
+- ✅ Strategy live hooks (venue hold, UNKNOWN orders) with **shadow decisions proven unchanged**:
+  - E3 recording output hash `febef904…`;
+  - golden synthetic hash `90fbc0c2…` (78 fills).
+- ✅ LiveEngine: 11 closed-loop scenarios against a fake MEXC:
+  - opening;
+  - capital and inventory refusals;
+  - stream drop and stale sync;
+  - rate limit / auth;
+  - duplicate fills;
+  - lost fill recovered;
+  - divergence halt;
+  - unknown place;
+  - orphan and foreign orders;
+  - bit-exact replay;
+  - restart.
+- ✅ LiveSession (boot cancel-all must be confirmed; sync; shutdown drains), live gate (every refusal tested), `dist/worker/live.js`, compose profile `live`.
+- ✅ Smoke: the real bundle against the real MEXC time endpoint refuses with all 8 reasons at once.
+- ⏳ Rollout step 1 (24 h paper on the real API with `LIVE_PAPER_OFFSET_BPS=500`): needs the MEXC trade key + VPS.
 
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.

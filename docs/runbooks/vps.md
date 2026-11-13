@@ -175,6 +175,31 @@ docker run --rm -v /srv/cortex/data:/data:ro -v /srv/cortex/repo/infra/prod:/pro
 
 O avaliador refaz o replay de cada par com o código da imagem (determinístico: mesmas entradas ⇒ mesmas decisões do shadow) e aplica o protocolo. O resultado só é **oficial** (exit 0, `"official": true`) se o fingerprint do código da imagem for o registrado. Caso contrário, exit 3. Leva até ~1,5 h por par em 21 dias (cerca de 13 mil registros/s). O aviso `gzip trailer missing` no arquivo da hora atual é esperado: o worker ainda está gravando nele.
 
+## 6c. Live (E8): só depois do GO
+
+O live fica **fechado** até que todos os itens abaixo valham. O processo recusa subir e lista o que falta.
+
+1. **Relatório oficial com GO.** Rode a avaliação do §6b com `--out /srv/cortex/data/live/report.json`. O avaliador imprime uma linha `LIVE_ACK=GO-<protocolo>-<PAR>`.
+2. **MEXC.** Exige KYC, 2FA e uma chave **só de trade** com estas restrições:
+   - **saque desligado**;
+   - **vinculada ao IP do VPS**;
+   - restrita ao par GO.
+
+   A API da MEXC não expõe essas permissões. Confira na tela da chave e só então preencha `LIVE_KEY_ATTESTED=trade-only,no-withdraw,ip-bound`.
+3. **Conta dedicada.** Só USDT, no máximo `LIVE_CAPITAL_QUOTE` × 1,1 (D1: US$15) e sem moeda do par. Um bot live por conta ou subconta.
+4. **No `cortex.env`:**
+   - `LIVE_SYMBOL` (o melhor par GO) e `LIVE_ACK` (a linha impressa);
+   - `LIVE_CAPITAL_QUOTE=15`;
+   - `MEXC_API_KEY` e `MEXC_API_SECRET`;
+   - `LIVE_REFERENCE_SYMBOL`, o par de referência da Binance, igual ao do shadow.
+5. **Passo 1, paper na API real (24 h):** use `LIVE_PAPER_OFFSET_BPS=500` e suba com `COMPOSE_PROFILES=live`. As ordens ficam 5% longe do preço e não executam. Critério para avançar:
+   - zero divergência e zero `fatal`;
+   - reconexões do user stream resolvidas sozinhas;
+   - `docker compose stop live` deixando **nenhuma** ordem aberta (confira na MEXC).
+6. **Passo 2, um ciclo supervisionado:** `LIVE_PAPER_OFFSET_BPS=0` com você olhando o painel. Depois, D1.
+
+**Parar tudo:** `docker compose stop live`. O processo cancela todas as ordens antes de sair (até 30 s). Se ele morrer à força, o próximo boot cancela tudo antes de qualquer outra coisa.
+
 ## 7. Incidentes
 
 - **Alerta do dead-man**: `docker logs --tail 20 cortex-deadman` diz qual par e por quê (heartbeat velho, feed parado, `halted`). `halted` = a estratégia parou por risco ou divergência de ledger: **investigar antes** de `reset_halt`.

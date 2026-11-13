@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import {
   BN, Ledger, MarketMakerStrategy, NigEstimator, botTag, canonicalJson, captureState, restoreState,
-  type LedgerTransaction, type StrategyConfig,
+  type LedgerTransaction, type SimEvent, type StrategyConfig,
 } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
 import { ENGINE_BEHAVIOR_VERSION, type EngineOutput, type EngineSnapshot, type InputRecord } from '../engine/shadow-engine';
@@ -30,7 +30,9 @@ export type LiveOutput =
   | EngineOutput
   | LiveRequest
   | { kind: 'sync'; ts: number; ok: boolean; reason: string; diffs: Array<{ asset: string; ledger: string; exchange: string }> }
-  | { kind: 'exec_warning'; ts: number; message: string };
+  | { kind: 'exec_warning'; ts: number; message: string }
+  /** A booked exchange fill, in the same shape as a simulated one (dashboard, alerts, fills page). */
+  | { kind: 'exec_fill'; event: Extract<SimEvent, { kind: 'fill' }> & { tradeId: string; isMaker: boolean } };
 
 export interface LiveEngineOptions {
   config: StrategyConfig;
@@ -310,6 +312,10 @@ export class LiveEngine {
     if (!posted) return; // same trade seen twice (stream + REST recovery)
     this.fills++;
     out.push({ kind: 'ledger', txId });
+    out.push({
+      kind: 'exec_fill',
+      event: { kind: 'fill', ts, clientOrderId: cid, fillId: e.tradeId, tradeId: e.tradeId, side: e.side, price: Number(e.price), qty: Number(e.qty), fee: feeKnown ? fee.toNumber() : 0, feeAsset: 'quote', isMaker: e.isMaker },
+    });
     if (!e.isMaker) out.push({ kind: 'exec_warning', ts, message: `taker fill ${e.tradeId} on a post-only order` });
     this.feed({
       kind: 'fill', ts, clientOrderId: cid, fillId: e.tradeId, side: e.side, price: Number(e.price), qty: Number(e.qty),
@@ -529,9 +535,10 @@ export class LiveEngine {
   }
 
   /**
-   * Rebuilds the engine from a snapshot of the same configuration. The restored engine always
-   * starts held: the stream state and every in-flight request are unknown after a restart, so
-   * the I/O layer must cancel all and sync before anything is quoted again.
+   * Rebuilds the engine from a snapshot of the same configuration. A restart is NOT applied here
+   * (that would make a resumed run differ from a replay of its recording): the live process
+   * records `{t:'stream', up:false, reason:'restart'}` as its first input after boot, which holds
+   * the engine until the stream is up and a fresh sync arrives.
    */
   static restore(o: LiveEngineOptions, s: EngineSnapshot): LiveEngine {
     const e = new LiveEngine(o);
@@ -541,10 +548,6 @@ export class LiveEngine {
     e.book = new Ledger();
     for (const tx of s.ledger as LedgerTransaction[]) e.book.post(tx);
     if (e.records !== s.records || e.lastTs !== s.lastTs) throw new Error('snapshot header does not match its state');
-    e.streamUp = false;
-    e.streamEpoch++;
-    e.syncPending = true;
-    e.lastSyncRequest = Number.NEGATIVE_INFINITY;
     return e;
   }
 }

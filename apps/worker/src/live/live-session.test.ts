@@ -4,7 +4,7 @@ import { MexcRestError, type MexcMyTrade, type MexcOrderRaw } from '@cortex/exch
 import { describe, expect, it } from 'vitest';
 import { testConfig } from '../testing/synthetic-inputs';
 import { LiveEngine, type LiveInputRecord, type LiveOutput } from './live-engine';
-import { LiveSession, type LiveRestApi } from './live-session';
+import { LiveSession, paperPrice, type LiveRestApi } from './live-session';
 
 type Dec = InstanceType<typeof BN>;
 const SYM = 'SOLUSDT';
@@ -96,6 +96,13 @@ function setup() {
 }
 
 describe('LiveSession (I/O around the live engine)', () => {
+  it('paper mode sends prices far from the market, rounded away from it, and never fills', () => {
+    expect(paperPrice('BUY', '88.00', 500, '0.01')).toBe('83.6');
+    expect(paperPrice('SELL', '88.10', 500, '0.01')).toBe('92.51'); // 92.505 → up, never toward the book
+    expect(paperPrice('BUY', '0.51237', 300, '0.00001')).toBe('0.49699'); // 0.4969989 → floor
+    expect(() => paperPrice('BUY', '0.01', 10_000, '0.01')).toThrow(/not positive/);
+  });
+
   it('boot cancels leftovers; opens after stream + sync; fills reach the ledger; shutdown leaves nothing resting', async () => {
     const { rest, engine, session, market, recorded, outs, fatal, at } = setup();
     rest.open.set('cfleftover1b', { orderId: 'OLD', side: 'BUY', price: '80', qty: new BN('0.1'), filled: new BN(0) });

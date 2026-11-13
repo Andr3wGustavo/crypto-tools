@@ -67,3 +67,53 @@ Goal: the same strategy that ran in shadow sends **real** orders to MEXC, unatte
 
 - MEXC: KYC + 2FA; a trade-only API key bound to the VPS IP and restricted to the GO pairs (no withdrawal); deposit US$15.
 - Type the `LIVE_ACK` value printed by the evaluator for the GO run. It is a deliberate, auditable act.
+
+## 7. Implementation status (2026-11-13)
+
+| Component | Where | Status |
+|---|---|---|
+| Private push decoding | `packages/exchange/src/mexc/private.ts` | ✅ order / fill / balance; REST order and myTrades replies map to the same events |
+| `MexcUserStream` | `packages/exchange/src/mexc/user-stream.ts` | ✅ listenKey validated before every reconnect, 30 min keepalive, per-channel ack required before `up`, silence / refusal / undecodable frame ⇒ `down` |
+| `LiveExecutor` | `packages/exchange/src/mexc/live-executor.ts` | ✅ per-order ordering, token bucket, 429 block, reject vs unknown, cancel retries, coalescing |
+| `LiveEngine` | `apps/worker/src/live/live-engine.ts` | ✅ the reconciler logic lives here (pure): UNKNOWN queries, outcome timeouts, orphan cancel, sync judgment |
+| `LiveSession` (I/O, boot, shutdown) | `apps/worker/src/live/live-session.ts` | ✅ |
+| Live gate | `apps/worker/src/live/live-gate.ts` | ✅ |
+| Live process | `apps/worker/src/live-main.ts` → `dist/worker/live.js`, compose profile `live` | ✅ built; never started by default |
+| Rollout step 1 (paper on the real API) | `LIVE_PAPER_OFFSET_BPS` | ✅ ready, waits for keys |
+
+## 8. Decisions taken during implementation (deviations from §1–§6)
+
+1. **Separate `LiveEngine` instead of one `Engine` with a venue.** The shadow engine is untouched,
+   so its decisions are frozen by construction. Both share the same strategy, ledger and edge
+   estimator; the live engine only replaces the simulator with exchange events.
+   - Proof: the E3 recording still replays to output hash `febef904…`, and a 60 min synthetic run
+     with 78 fills to `90fbc0c2…`, pinned as a golden test.
+2. **Strategy live hooks:** a `venue` hold event and an `UNKNOWN` order status. A side with an
+   unknown order is frozen: no new quote, no cancel, funds stay locked. Shadow never emits either.
+   - The strategy gained one state field (`venueHold`), so `ENGINE_STATE_VERSION` is 2.
+   - The **experiment identity** uses the separate `ENGINE_BEHAVIOR_VERSION` (still 1). Recordings stay replayable; old snapshots are ignored.
+3. **Live code lives outside the fingerprinted scope** (`apps/worker/src/live/`). The fingerprint
+   that makes an evaluation official pins `packages/core` and the shadow engine only. A fix to the
+   live I/O never invalidates a registered experiment; a change to the strategy does, as it should.
+4. **Venue hold precedence:** `fatal` (sticky until `reset_halt`) > `opening` > `stream_down` >
+   `syncing` > `rate_limited` (10 s) > `clock` (30 s).
+   - `fatal` covers:
+     - auth failure;
+     - a foreign order or fill on the pair;
+     - a fee charged in a third asset;
+     - more capital than configured, or inventory on the account at opening.
+   - The alerter raises a fatal hold as critical at once, and a transient hold only if it lasts more than 60 s.
+5. **Opening books the real balances.** The strategy sees no prices before the opening sync, so the
+   loss budget is measured from what is really on the account.
+   - Refuses more than 1.1 × `LIVE_CAPITAL_QUOTE` of quote.
+   - Refuses inventory worth at least the minimum order at start.
+   - **One live bot per account** (or sub-account): the ledger must explain the whole balance.
+6. **Syncs are epoch-tagged.** A snapshot taken before the latest user-stream change is ignored.
+   - A balance mismatch first holds and re-syncs.
+   - Only **two consecutive** mismatches halt (sticky). A fill landing between two REST calls cannot cause a false halt.
+7. **A restart is an input** (`stream down: restart`) recorded first after boot, never a side effect
+   of `restore()`. So a resumed run equals a replay of its recording, bit for bit.
+8. **Key permissions and IP binding cannot be proven over the MEXC API.** They are an explicit operator
+   attestation (`LIVE_KEY_ATTESTED=trade-only,no-withdraw,ip-bound`), checked in the MEXC UI. The account itself must be able to trade with SPOT permission.
+9. **`clientId` is not guaranteed in deal pushes:** fills are matched by `orderId` learned from the
+   place reply / order pushes. A fill of an unknown order is still booked (it is our money), then re-synced.

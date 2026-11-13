@@ -108,6 +108,41 @@ services:
       driver: json-file
       options: { max-size: 10m, max-file: "3" }
 
+  # LIVE trading (E8). Never started by default: only with COMPOSE_PROFILES=live, after the GO
+  # and the operator's LIVE_ACK. It refuses to boot unless the live gate opens (docs/E8-DESIGN.md).
+  live:
+    image: ghcr.io/andr3wgustavo/cortex-worker:${IMAGE_TAG:?set IMAGE_TAG}
+    container_name: cortex-live
+    profiles: ["live"]
+    restart: unless-stopped
+    command: ["node", "--enable-source-maps", "dist/live.js"]
+    stop_grace_period: 30s # the drain cancels every order before exiting
+    depends_on:
+      redis: { condition: service_healthy }
+    environment:
+      TRADING_MODE: live
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LIVE_DATA_DIR: /data/live
+      HEARTBEAT_DIR: /data/health
+      LIVE_REPORT_FILE: /data/live/report.json
+      LIVE_SYMBOL: ${LIVE_SYMBOL:-}
+      LIVE_ACK: ${LIVE_ACK:-}
+      LIVE_CAPITAL_QUOTE: ${LIVE_CAPITAL_QUOTE:-}
+      LIVE_CAPITAL_MAX: ${LIVE_CAPITAL_MAX:-15}
+      LIVE_KEY_ATTESTED: ${LIVE_KEY_ATTESTED:-}
+      LIVE_PAPER_OFFSET_BPS: ${LIVE_PAPER_OFFSET_BPS:-0}
+      BOT_REFERENCE_SYMBOL: ${LIVE_REFERENCE_SYMBOL:-}
+      MEXC_API_KEY: ${MEXC_API_KEY:-}
+      MEXC_API_SECRET: ${MEXC_API_SECRET:-}
+      WITHDRAW_ENABLED: "false"
+    volumes:
+      - ${CORTEX_DATA:-/srv/cortex/data}:/data
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: 20m, max-file: "5" }
+
 volumes:
   pgdata:
   redisdata:

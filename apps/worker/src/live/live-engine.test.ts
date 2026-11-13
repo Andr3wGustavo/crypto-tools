@@ -349,9 +349,10 @@ describe('LiveEngine: determinism and restart', () => {
     const h2 = new Harness(restored);
     Object.assign(h2, { quote: h.quote, base: h.base, ts: h.ts, seq: h.seq });
     for (const [k, v] of h.open) h2.open.set(k, v);
-    h2.market(2_000);
+    h2.stream(false); // what the live process records first after a boot
     expect(restored.venueHold).toBe('stream_down');
-    h2.stream(false);
+    expect(h2.open.size).toBe(0); // cancel-all requested on the way down
+    h2.market(2_000);
     h2.stream(true);
     h2.market(20_000);
     expect(restored.venueHold).toBeNull();

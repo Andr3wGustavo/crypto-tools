@@ -1,5 +1,9 @@
 import { SERIES_STEP_MS, type BotEvent, type BotView, type SeriesPoint } from '@cortex/shared';
 import type { EngineOutput, InputRecord, ShadowEngine } from '../engine/shadow-engine';
+import type { LiveInputRecord, LiveOutput } from '../live/live-engine';
+
+/** What the view reads from an engine (shadow and live expose the same read side). */
+export type ViewableEngine = Pick<ShadowEngine, 'strategy' | 'edge' | 'recordCount' | 'fillCount'>;
 
 /**
  * Maps the engine's internal state and outputs to the dashboard wire contracts in
@@ -26,7 +30,13 @@ const finite = (x: number | undefined | null): number | null => (x !== undefined
 const positive = (x: number | undefined | null): number | null => (finite(x) !== null && (x as number) > 0 ? (x as number) : null);
 
 /** Engine output → wire event (undefined = not shown: samples and ledger ids). */
-export function toWireEvent(o: EngineOutput): BotEvent | undefined {
+export function toWireEvent(o: EngineOutput | LiveOutput): BotEvent | undefined {
+  if (o.kind === 'exec_fill') {
+    const e = o.event;
+    return { k: 'fill', ts: e.ts, fillId: e.fillId, clientOrderId: e.clientOrderId, side: e.side, price: e.price, qty: e.qty, fee: e.fee, feeAsset: e.feeAsset };
+  }
+  if (o.kind === 'exec_warning') return { k: 'error', ts: o.ts, message: o.message };
+  if (o.kind === 'request' || o.kind === 'sync') return undefined; // I/O plumbing, logged by the live process
   if (o.kind === 'sim') {
     const e = o.event;
     if (e.kind === 'fill') return { k: 'fill', ts: e.ts, fillId: e.fillId, clientOrderId: e.clientOrderId, side: e.side, price: e.price, qty: e.qty, fee: e.fee, feeAsset: e.feeAsset };
@@ -54,7 +64,7 @@ export function toWireEvent(o: EngineOutput): BotEvent | undefined {
   }
 }
 
-export function toWireEvents(outs: EngineOutput[]): BotEvent[] {
+export function toWireEvents(outs: ReadonlyArray<EngineOutput | LiveOutput>): BotEvent[] {
   const r: BotEvent[] = [];
   for (const o of outs) {
     const e = toWireEvent(o);
@@ -79,7 +89,7 @@ export class BotViewBuilder {
 
   constructor(readonly id: BotIdentity, private readonly stepMs = SERIES_STEP_MS) {}
 
-  observe(r: InputRecord, outs: readonly EngineOutput[]): void {
+  observe(r: InputRecord | LiveInputRecord, outs: ReadonlyArray<EngineOutput | LiveOutput>): void {
     this.lastTs = r.ts;
     if (r.t === 'book') {
       if (r.venue === 'reference') this.refMid = positive((r.bid + r.ask) / 2);
@@ -98,7 +108,7 @@ export class BotViewBuilder {
     }
   }
 
-  view(engine: ShadowEngine, feeds: FeedAges): BotView {
+  view(engine: ViewableEngine, feeds: FeedAges): BotView {
     const s = engine.strategy.snapshot();
     const edge = engine.edge.state;
     const v = engine.edge.verdict();

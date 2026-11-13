@@ -54,7 +54,8 @@ export class NdjsonRecorder {
     this.flushEveryMs = opts.flushEveryMs ?? 1_000;
   }
 
-  write(r: InputRecord): void {
+  /** Any input record (shadow or live): it only needs its timestamp for file rotation. */
+  write(r: InputRecord | { t: string; ts: number }): void {
     let key = utcHourKey(r.ts);
     if (key < this.floorKey) key = this.floorKey;
     if (key > this.currentKey) this.rotate(key);
