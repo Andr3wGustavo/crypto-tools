@@ -78,9 +78,72 @@ function decimalUnit(decimals: number | undefined, field: string): string {
 
 export class MexcRestError extends Error {
   override name = 'MexcRestError';
-  constructor(message: string, readonly status: number, readonly code?: number) {
+  constructor(message: string, readonly status: number, readonly code?: number, readonly retryAfterMs?: number) {
     super(message);
   }
+}
+
+/**
+ * What a failed request means for an order, the question live execution must answer exactly:
+ *  - `rejected`: the exchange answered and refused it, so it did not happen (4xx with a body).
+ *  - `rate_limited`: refused (429 / rate-limit code); back off before the next request.
+ *  - `auth` / `clock`: refused because of credentials or timestamp; nothing works until fixed.
+ *  - `unknown`: timeout, network error, 5xx or an unparseable reply. The request may or may
+ *    not have been executed: the order state is UNKNOWN until queried (never assume either way).
+ */
+export type MexcFailure = 'rejected' | 'rate_limited' | 'auth' | 'clock' | 'unknown';
+
+// Codes from the MEXC spot v3 error table. An unlisted 4xx code falls into `rejected`, which is
+// still the safe reading (refused ⇒ not executed); only the reaction differs (halt vs retry later).
+const AUTH_CODES = new Set([602, 700001, 700002, 700004, 700005, 700006, 700007, 10072]);
+const CLOCK_CODES = new Set([700003]);
+// -2011 "Unknown order sent"; -2013 "Order does not exist" (query of an id the exchange never saw).
+const UNKNOWN_ORDER_CODES = new Set([-2011, -2013]);
+
+export function classifyMexcError(err: unknown): MexcFailure {
+  if (!(err instanceof MexcRestError)) return 'unknown';
+  if (err.status === 429 || err.code === 429) return 'rate_limited';
+  if (err.status === 0) return 'auth'; // missing credentials: refused locally, nothing was sent
+  if (err.code !== undefined && AUTH_CODES.has(err.code)) return 'auth';
+  if (err.code !== undefined && CLOCK_CODES.has(err.code)) return 'clock';
+  if (err.status === 401 || err.status === 403) return 'auth';
+  if (err.status >= 400 && err.status < 500 && err.code !== undefined) return 'rejected';
+  return 'unknown';
+}
+
+/** The exchange does not know this order (never placed, or already gone): resolve by query. */
+export const isUnknownOrder = (err: unknown): boolean => err instanceof MexcRestError && err.code !== undefined && UNKNOWN_ORDER_CODES.has(err.code);
+
+/** Order as returned by query / cancel / openOrders (GET/DELETE /api/v3/order, /api/v3/openOrders). */
+export interface MexcOrderRaw {
+  symbol: string;
+  orderId: string;
+  clientOrderId: string;
+  price: string;
+  origQty: string;
+  executedQty: string;
+  cummulativeQuoteQty?: string;
+  status: string;
+  type?: string;
+  side: 'BUY' | 'SELL';
+  time?: number;
+  updateTime?: number;
+}
+
+/** Fill as returned by GET /api/v3/myTrades. */
+export interface MexcMyTrade {
+  symbol: string;
+  id: string;
+  orderId: string;
+  clientOrderId?: string;
+  price: string;
+  qty: string;
+  quoteQty?: string;
+  commission: string;
+  commissionAsset: string;
+  time: number;
+  isBuyer: boolean;
+  isMaker: boolean;
 }
 
 /**
@@ -99,7 +162,12 @@ export class MexcRest {
     return this.opts.base ?? MEXC_REST_BASE;
   }
 
-  private async request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, params: Record<string, string | number> = {}, signed = false): Promise<T> {
+  /** Server − local clock (ms), as last measured by `syncTime`. */
+  get timeOffset(): number {
+    return this.timeOffsetMs;
+  }
+
+  private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, params: Record<string, string | number> = {}, signed = false): Promise<T> {
     const q = new URLSearchParams(Object.entries(params).map(([k, v]): [string, string] => [k, String(v)]));
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (signed) {
@@ -119,8 +187,12 @@ export class MexcRest {
       body = text;
     }
     if (!res.ok) {
-      const b = body as { msg?: string; code?: number };
-      throw new MexcRestError(`MEXC ${method} ${path} → ${res.status}: ${b?.msg ?? text.slice(0, 200)}`, res.status, b?.code);
+      const b = (typeof body === 'object' && body !== null ? body : {}) as { msg?: string; code?: number };
+      const ra = Number(res.headers.get('retry-after'));
+      throw new MexcRestError(
+        `MEXC ${method} ${path} → ${res.status}: ${b.msg ?? String(text).slice(0, 200)}`, res.status,
+        typeof b.code === 'number' ? b.code : undefined, Number.isFinite(ra) && ra > 0 ? ra * 1_000 : undefined,
+      );
     }
     return body as T;
   }
@@ -174,28 +246,52 @@ export class MexcRest {
 
   // ---------------- signed (live, phase E8) ----------------
 
+  /** Post-only limit order: rejected (or canceled at once) by the exchange if it would take liquidity. */
   placeLimitMaker(symbol: string, side: 'BUY' | 'SELL', quantity: string, price: string, newClientOrderId: string) {
-    return this.request<{ orderId: string }>('POST', '/api/v3/order', { symbol, side, type: 'LIMIT_MAKER', quantity, price, newClientOrderId }, true);
+    return this.request<{ symbol: string; orderId: string; price?: string; origQty?: string; transactTime?: number }>(
+      'POST', '/api/v3/order', { symbol, side, type: 'LIMIT_MAKER', quantity, price, newClientOrderId }, true,
+    );
   }
 
   cancelOrder(symbol: string, origClientOrderId: string) {
-    return this.request('DELETE', '/api/v3/order', { symbol, origClientOrderId }, true);
+    return this.request<MexcOrderRaw>('DELETE', '/api/v3/order', { symbol, origClientOrderId }, true);
   }
 
   cancelAll(symbol: string) {
-    return this.request('DELETE', '/api/v3/openOrders', { symbol }, true);
+    return this.request<MexcOrderRaw[]>('DELETE', '/api/v3/openOrders', { symbol }, true);
   }
 
   queryOrder(symbol: string, origClientOrderId: string) {
-    return this.request<{ status: string; executedQty: string; origQty: string }>('GET', '/api/v3/order', { symbol, origClientOrderId }, true);
+    return this.request<MexcOrderRaw>('GET', '/api/v3/order', { symbol, origClientOrderId }, true);
   }
 
   openOrders(symbol: string) {
-    return this.request<Array<{ clientOrderId: string; status: string }>>('GET', '/api/v3/openOrders', { symbol }, true);
+    return this.request<MexcOrderRaw[]>('GET', '/api/v3/openOrders', { symbol }, true);
+  }
+
+  /** Own fills, newest last; `startTime` bounds the window (used to recover fills missed by the stream). */
+  myTrades(symbol: string, startTime?: number, limit = 100) {
+    return this.request<MexcMyTrade[]>('GET', '/api/v3/myTrades', { symbol, limit: Math.min(100, Math.max(1, limit)), ...(startTime !== undefined ? { startTime } : {}) }, true);
   }
 
   account() {
-    return this.request<{ balances: Array<{ asset: string; free: string; locked: string }> }>('GET', '/api/v3/account', {}, true);
+    return this.request<{ canTrade?: boolean; canWithdraw?: boolean; canDeposit?: boolean; permissions?: string[]; balances: Array<{ asset: string; free: string; locked: string }> }>('GET', '/api/v3/account', {}, true);
+  }
+
+  // ---------------- user data stream (listenKey: valid 60 min, extended by each keepalive) ----------------
+
+  async createListenKey(): Promise<string> {
+    const r = await this.request<{ listenKey?: string }>('POST', '/api/v3/userDataStream', {}, true);
+    if (typeof r.listenKey !== 'string' || !/^[A-Za-z0-9]{16,128}$/.test(r.listenKey)) throw new MexcRestError('MEXC returned no valid listenKey', 200);
+    return r.listenKey;
+  }
+
+  async keepAliveListenKey(listenKey: string): Promise<void> {
+    await this.request('PUT', '/api/v3/userDataStream', { listenKey }, true);
+  }
+
+  async deleteListenKey(listenKey: string): Promise<void> {
+    await this.request('DELETE', '/api/v3/userDataStream', { listenKey }, true);
   }
 }
 

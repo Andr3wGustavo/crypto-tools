@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mapBinanceCombined } from './binance/market-stream';
 import { decodeMexcPush, encodeMexcPush, mexcChannels } from './mexc/codec';
 import { mapMexcPush } from './mexc/market-stream';
-import { MexcRest, mexcSymbolInfo, signMexc } from './mexc/rest';
+import { MexcRest, MexcRestError, classifyMexcError, isUnknownOrder, mexcSymbolInfo, signMexc } from './mexc/rest';
 import type { BookTick, TradeTick } from './types';
 
 describe('MEXC protobuf codec', () => {
@@ -75,5 +75,43 @@ describe('MEXC REST', () => {
     expect(calls[0]!.headers['X-MEXC-APIKEY']).toBe('k');
     expect(calls[0]!.url).toMatch(/recvWindow=5000&timestamp=\d+&signature=[0-9a-f]{64}$/);
     await expect(new MexcRest({ fetchImpl }).account()).rejects.toThrow(/requires API key/);
+  });
+});
+
+describe('MEXC REST failure semantics (what a failed order request means)', () => {
+  const reply = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    (async () => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers })) as unknown as typeof fetch;
+  const fail = async (f: typeof fetch) => new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: f }).placeLimitMaker('IOUSDT', 'BUY', '1', '0.5', 'c1').then(() => undefined, (e: unknown) => e);
+
+  it('classifies refusals (not executed) vs unknown outcomes (must be queried)', async () => {
+    expect(classifyMexcError(await fail(reply(400, { code: 10101, msg: 'Insufficient balance' })))).toBe('rejected');
+    expect(classifyMexcError(await fail(reply(400, { code: 700003, msg: 'Timestamp outside recvWindow' })))).toBe('clock');
+    expect(classifyMexcError(await fail(reply(400, { code: 700002, msg: 'Signature not valid' })))).toBe('auth');
+    const limited = await fail(reply(429, { code: 429, msg: 'Too Many Requests' }, { 'retry-after': '3' }));
+    expect(classifyMexcError(limited)).toBe('rate_limited');
+    expect((limited as MexcRestError).retryAfterMs).toBe(3_000);
+    expect(classifyMexcError(await fail(reply(500, 'oops')))).toBe('unknown');
+    expect(classifyMexcError(await fail(reply(502, '<html>bad gateway</html>')))).toBe('unknown');
+    expect(classifyMexcError(await fail(reply(400, 'no json body')))).toBe('unknown');
+    expect(classifyMexcError(await fail((async () => { throw new DOMException('timed out', 'TimeoutError'); }) as unknown as typeof fetch))).toBe('unknown');
+    expect(classifyMexcError(await new MexcRest({ fetchImpl: reply(200, {}) }).account().then(() => undefined, (e: unknown) => e))).toBe('auth');
+    expect(isUnknownOrder(await fail(reply(400, { code: -2011, msg: 'Unknown order sent' })))).toBe(true);
+    expect(isUnknownOrder(await fail(reply(400, { code: 10101, msg: 'x' })))).toBe(false);
+  });
+
+  it('listenKey lifecycle: POST create, PUT keepalive, DELETE close, all signed', async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    const f = (async (url: string, init: { method: string }) => {
+      calls.push({ method: init.method, url });
+      return new Response(JSON.stringify({ listenKey: 'pqia91ma19a5s61cv6a81va65sdf19v8a65a1a5s61cv6a81va65sdf19v8a65a1' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const rest = new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: f });
+    const key = await rest.createListenKey();
+    await rest.keepAliveListenKey(key);
+    await rest.deleteListenKey(key);
+    expect(calls.map((c) => c.method)).toEqual(['POST', 'PUT', 'DELETE']);
+    expect(calls.every((c) => c.url.startsWith('https://api.mexc.com/api/v3/userDataStream?') && /signature=[0-9a-f]{64}$/.test(c.url))).toBe(true);
+    expect(calls[1]!.url).toContain(`listenKey=${key}`);
+    await expect(new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: reply(200, {}) }).createListenKey()).rejects.toThrow(/no valid listenKey/);
   });
 });

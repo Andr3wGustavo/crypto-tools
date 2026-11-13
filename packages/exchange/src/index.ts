@@ -6,3 +6,4 @@ export * from './mexc/rest';
 export * from './binance/market-stream';
 export * from './binance/rest';
 export * from './mexc/private';
+export * from './mexc/user-stream';
