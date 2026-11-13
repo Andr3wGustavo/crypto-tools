@@ -3,6 +3,7 @@ import path from 'node:path';
 import { decidePair, goProbabilityThreshold, type EdgeObservation, type PairDecision } from '@cortex/core';
 import { metaToOptions, type ReplayMeta } from './engine/run-meta';
 import { ShadowEngine } from './engine/shadow-engine';
+import { liveAck } from './live/live-gate';
 import { verifyEdgeProtocol, type EdgeProtocolFile } from './ops/edge-protocol-file';
 import { runtimeFingerprint } from './ops/source-fingerprint';
 import { listRecordings, readNdjsonGz, recordingHourSpan } from './recorder/ndjson';
@@ -173,6 +174,10 @@ async function cli(): Promise<void> {
     console.error(`${r.symbol.padEnd(14)} ${r.decision.padEnd(8)} ${stats}\n${' '.repeat(24)}${r.reason}`);
   }
   console.error(`STATUS: ${report.status}${report.go.length ? ` → live D1 candidate: ${report.go[0]}` : ''}`);
+  if (report.status === 'GO' && report.official) {
+    // The operator types this into LIVE_ACK to open the live gate (apps/worker/src/live/live-gate.ts).
+    console.error(`LIVE_ACK=${liveAck(report, report.go[0]!)}`);
+  }
   process.exit(report.official ? 0 : 3);
 }
 

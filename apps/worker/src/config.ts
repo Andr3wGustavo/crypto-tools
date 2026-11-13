@@ -28,8 +28,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     throw new Error(`Invalid worker configuration:\n${parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n')}`);
   }
   if (parsed.data.TRADING_MODE === 'live') {
-    // Live execution (MexcExecutor) is phase E8 and requires the dashboard 2FA flow. Refuse loudly.
-    throw new Error('TRADING_MODE=live is not enabled in this build. Shadow mode only until phase E8.');
+    // The shadow worker never trades. Live runs only through the live entry point, behind the live
+    // gate (GO report + LIVE_ACK + key attestation + capital cap: apps/worker/src/live/live-gate.ts).
+    throw new Error('TRADING_MODE=live is refused by the shadow worker. Live trading uses its own entry point behind the live gate.');
   }
   return parsed.data;
 }

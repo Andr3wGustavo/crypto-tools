@@ -4,7 +4,7 @@ import {
   type LedgerTransaction, type StrategyConfig,
 } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
-import { ENGINE_BEHAVIOR_VERSION, type EngineOutput, type EngineSnapshot, type InputRecord } from './shadow-engine';
+import { ENGINE_BEHAVIOR_VERSION, type EngineOutput, type EngineSnapshot, type InputRecord } from '../engine/shadow-engine';
 
 /**
  * Live inputs = the shadow inputs (market, clock, health, commands) plus everything the exchange
