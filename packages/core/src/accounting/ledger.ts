@@ -9,6 +9,7 @@ import type BigNumber from 'bignumber.js';
  * Accounts:
  *   cash:<A>            tradable balance on the exchange      (never negative)
  *   treasury:<A>        protected profit, never traded        (never negative)
+ *   withdrawing:<A>     treasury reserved for a withdrawal in flight (still on the exchange until settled)
  *   trading:<A>         conversion account for fills
  *   expense:fees:<A>    fees paid
  *   equity:capital:<A>  deposits (owner capital)
@@ -23,7 +24,7 @@ export interface Posting {
 export interface LedgerTransaction {
   id: string;
   ts: number;
-  kind: 'deposit' | 'fill' | 'treasury_split' | 'treasury_promotion' | 'withdrawal' | 'adjustment';
+  kind: 'deposit' | 'fill' | 'treasury_split' | 'treasury_promotion' | 'withdrawal_reserve' | 'withdrawal_release' | 'withdrawal' | 'adjustment';
   ref?: string;
   memo?: string;
   postings: Posting[];
@@ -36,7 +37,7 @@ export class InsufficientFundsError extends Error {
   override name = 'InsufficientFundsError';
 }
 
-const NON_NEGATIVE = /^(cash|treasury):/;
+const NON_NEGATIVE = /^(cash|treasury|withdrawing):/;
 
 export function assertBalanced(tx: LedgerTransaction): void {
   const sums = new Map<string, BigNumber>();
@@ -103,7 +104,7 @@ export class Ledger {
     return t;
   }
 
-  /** Mark-to-market value of exchange-held balances (cash + treasury) in the quote asset. */
+  /** Mark-to-market value of exchange-held balances (cash + treasury + withdrawing) in the quote asset. */
   equity(quote: string, marks: Record<string, number>): number {
     let e = new BN(0);
     for (const [k, v] of this.bal) {
@@ -150,7 +151,7 @@ export class Ledger {
   }
 
   static transfer(
-    id: string, ts: number, kind: 'treasury_split' | 'treasury_promotion',
+    id: string, ts: number, kind: 'treasury_split' | 'treasury_promotion' | 'withdrawal_reserve' | 'withdrawal_release',
     from: string, to: string, asset: string, amount: BigNumber.Value,
   ): LedgerTransaction {
     const a = new BN(amount);
@@ -163,14 +164,19 @@ export class Ledger {
     };
   }
 
-  static withdrawal(id: string, ts: number, asset: string, gross: BigNumber.Value, fee: BigNumber.Value): LedgerTransaction {
+  /**
+   * Money leaving the exchange: `gross` leaves `from` (the reserve of a withdrawal in flight, or the
+   * treasury directly); the owner receives gross − fee.
+   */
+  static withdrawal(id: string, ts: number, asset: string, gross: BigNumber.Value, fee: BigNumber.Value, from: 'treasury' | 'withdrawing' = 'treasury'): LedgerTransaction {
     const g = new BN(gross);
     const f = new BN(fee);
+    if (!g.gt(0) || f.lt(0)) throw new RangeError('withdrawal amounts must be gross > 0, fee ≥ 0');
     if (f.gt(g)) throw new RangeError('withdrawal fee exceeds gross amount');
     return {
       id, ts, kind: 'withdrawal',
       postings: [
-        { account: `treasury:${asset}`, asset, amount: g.negated().toFixed() },
+        { account: `${from}:${asset}`, asset, amount: g.negated().toFixed() },
         { account: `external:${asset}`, asset, amount: g.minus(f).toFixed() },
         ...(f.isZero() ? [] : [{ account: `expense:fees:${asset}`, asset, amount: f.toFixed() }]),
       ],

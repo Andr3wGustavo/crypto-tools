@@ -54,7 +54,13 @@ export type StrategyEvent =
    * clock, auth). Non-null ⇒ cancel everything and do not quote; null ⇒ quote again. Never sent
    * in shadow, so shadow behaviour is unchanged.
    */
-  | { kind: 'venue'; ts: number; hold: string | null };
+  | { kind: 'venue'; ts: number; hold: string | null }
+  /**
+   * Live only: quote moved out of (negative) or into (positive) the tradable balance by the
+   * treasury (profit skim). Not PnL: start / peak / day-start equity move by the same amount, so
+   * drawdown and loss limits are unaffected. Never sent in shadow.
+   */
+  | { kind: 'transfer'; ts: number; quote: number; reason: string };
 
 export type BotStatus = 'running' | 'paused' | 'halted' | 'killed';
 

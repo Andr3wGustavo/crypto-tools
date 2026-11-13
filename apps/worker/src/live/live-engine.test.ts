@@ -3,7 +3,7 @@ import { BN } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
 import { describe, expect, it } from 'vitest';
 import { testConfig } from '../testing/synthetic-inputs';
-import { LiveEngine, type LiveEngineOptions, type LiveInputRecord, type LiveOutput } from './live-engine';
+import { LiveEngine, type LiveEngineOptions, type LiveInputRecord, type LiveOutput, type WithdrawRequest } from './live-engine';
 
 const opts: LiveEngineOptions = { config: testConfig, capitalQuote: 15 };
 const SYM = 'SOLUSDT';
@@ -29,6 +29,8 @@ class Harness {
   dropStreamFills = false;
   stripClientIds = false;
   autoSync = true;
+  /** The withdrawer side (E9): sees every withdraw request; answers by calling `withdrawAnswer`. */
+  onWithdrawRequest: ((r: WithdrawRequest) => void) | undefined;
   private queue: LiveInputRecord[] = [];
 
   constructor(public engine = new LiveEngine(opts)) {}
@@ -76,6 +78,7 @@ class Harness {
       return;
     }
     if (o.kind === 'action' && o.action.kind === 'cancel') return this.cancelOne(o.action.clientOrderId);
+    if (o.kind === 'withdraw_request') return this.onWithdrawRequest?.(o);
     if (o.kind !== 'request') return;
     switch (o.op) {
       case 'cancel':
@@ -136,6 +139,11 @@ class Harness {
     this.trades.push(t);
     if (!this.dropStreamFills) this.feed({ t: 'exec', ts: t.ts, e: t });
     return t;
+  }
+
+  /** The withdrawer's report (queued like any exchange answer). */
+  withdrawAnswer(a: Omit<Extract<LiveInputRecord, { t: 'withdraw' }>, 't' | 'ts'>): void {
+    this.queue.push({ t: 'withdraw', ts: this.now(), ...a });
   }
 
   /** Opens the session: market, user stream up, opening sync. */
@@ -357,5 +365,236 @@ describe('LiveEngine: determinism and restart', () => {
     h2.market(20_000);
     expect(restored.venueHold).toBeNull();
     expect(h2.outs.some((o) => o.kind === 'reconcile')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- E9: treasury + withdrawals
+
+const wOpts: LiveEngineOptions = { ...opts, treasury: { withdraw: { minAmount: 0.03, dailyCap: 1 } } };
+const wdStatus = (outs: LiveOutput[]) => outs.flatMap((o) => (o.kind === 'withdrawal' ? [o.w.status] : []));
+const bal = (h: Harness, acct: string) => h.engine.ledger.balance(`${acct}:USDT`, 'USDT').toFixed();
+const syncTrouble = (outs: LiveOutput[]) => outs.some((o) => (o.kind === 'sync' && !o.ok) || o.kind === 'reconcile');
+
+/** Buys at 88, the market rallies, sells higher: a realized, equity-confirmed profit of ~0.087. */
+function profitable(h: Harness): void {
+  h.start();
+  h.fill('BUY');
+  h.market(4_000, 92, 92.1);
+  h.fill('SELL');
+  h.market(65_000, 92, 92.1); // skim timer + a periodic sync
+}
+
+/** A withdrawer that holds every request for the test to answer. */
+function capture(h: Harness): WithdrawRequest[] {
+  const seen: WithdrawRequest[] = [];
+  h.onWithdrawRequest = (r) => seen.push(r);
+  return seen;
+}
+
+describe('LiveEngine: treasury skim (E9)', () => {
+  it('half of the realized, equity-confirmed profit leaves cash for the treasury; it is not a loss', () => {
+    const h = new Harness();
+    profitable(h);
+    const s = status(h);
+    expect(s.realizedPnl).toBeCloseTo(0.0874, 9);
+    expect(bal(h, 'treasury')).toBe('0.04'); // 50% of 0.0874, rounded DOWN to the cent
+    expect(h.outs.filter((o) => o.kind === 'treasury')).toHaveLength(1);
+    // The strategy no longer trades it, and its risk references moved with it (no fake drawdown).
+    expect(s.quoteTotal).toBeCloseTo(15.0874 - 0.04, 9);
+    expect(s.startEquity).toBeCloseTo(15 - 0.04, 9);
+    expect(s.status).toBe('running');
+    // On the exchange it is one balance: cash + treasury = exchange quote, and syncs agree.
+    expect(new BN(bal(h, 'cash')).plus(bal(h, 'treasury')).toFixed()).toBe(h.quote.toFixed());
+    h.market(130_000, 92, 92.1);
+    expect(syncTrouble(h.outs)).toBe(false);
+    expect(bal(h, 'treasury')).toBe('0.04'); // nothing skimmed twice
+  });
+
+  it('a loss, or unrealized gains only ⇒ nothing is skimmed', () => {
+    const loss = new Harness();
+    loss.start();
+    loss.fill('BUY');
+    loss.market(4_000, 85, 85.1);
+    loss.fill('SELL');
+    loss.market(65_000, 85, 85.1);
+    expect(status(loss).realizedPnl).toBeLessThan(0);
+    expect(bal(loss, 'treasury')).toBe('0');
+
+    const paper = new Harness();
+    paper.start();
+    paper.fill('BUY');
+    paper.market(65_000, 95, 95.1); // up a lot, but nothing realized
+    expect(bal(paper, 'treasury')).toBe('0');
+  });
+});
+
+describe('LiveEngine: withdrawals (E9)', () => {
+  it('happy path: reserve → submit → SENT (debited) → CONFIRMED; books match the exchange throughout', () => {
+    const h = new Harness(new LiveEngine(wOpts));
+    const reqs = capture(h);
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    expect(wdStatus(h.outs)).toEqual(['PENDING']);
+    expect(reqs).toHaveLength(1);
+    const r = reqs[0]!;
+    expect(r).toMatchObject({ mode: 'submit', amount: '0.04', asset: 'USDT' });
+    expect(r.id).toMatch(/^wd[0-9a-z]+-1$/);
+    // Reserved BEFORE anything is sent.
+    expect(bal(h, 'treasury')).toBe('0');
+    expect(bal(h, 'withdrawing')).toBe('0.04');
+
+    // The exchange debits the account as it accepts the withdrawal; the sync accepts both states.
+    h.quote = h.quote.minus('0.04');
+    h.withdrawAnswer({ id: r.id, status: 'SENT', exchangeId: 'E1' });
+    h.market(70_000, 92, 92.1);
+    expect(syncTrouble(h.outs)).toBe(false);
+    expect(reqs.length).toBeGreaterThan(1);
+    expect(reqs.slice(1).every((x) => x.mode === 'status')).toBe(true); // re-asked, never re-submitted
+
+    h.withdrawAnswer({ id: r.id, status: 'CONFIRMED', amount: '0.04', fee: '0.01', txId: '5xSig' });
+    h.market(70_000, 92, 92.1);
+    expect(wdStatus(h.outs)).toEqual(['PENDING', 'SENT', 'CONFIRMED']);
+    expect(bal(h, 'withdrawing')).toBe('0');
+    expect(bal(h, 'external')).toBe('0.03'); // the owner receives amount − fee
+    expect(h.engine.ledger.balance('expense:fees:USDT', 'USDT').toFixed()).toBe('0.01');
+    expect(h.engine.treasuryView().withdrawals[0]).toMatchObject({ status: 'CONFIRMED', exchangeId: 'E1', txId: '5xSig', fee: '0.01' });
+    expect(syncTrouble(h.outs)).toBe(false);
+    expect(status(h).status).toBe('running');
+  });
+
+  it('a definitive failure restores the reserve; the next attempt waits for the cooldown', () => {
+    const h = new Harness(new LiveEngine(wOpts));
+    const reqs = capture(h);
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    h.withdrawAnswer({ id: reqs[0]!.id, status: 'FAILED', reason: 'refused: address not whitelisted' });
+    h.market(2_000, 92, 92.1);
+    expect(bal(h, 'treasury')).toBe('0.04');
+    expect(bal(h, 'withdrawing')).toBe('0');
+    h.market(3_600_000, 92, 92.1);
+    expect(wdStatus(h.outs)).toEqual(['PENDING', 'FAILED']); // no retry loop
+    expect(syncTrouble(h.outs)).toBe(false);
+  });
+
+  it('locks: never while paused, unreconciled, below the minimum, or with equity under the principal', () => {
+    const paused = new Harness(new LiveEngine(wOpts));
+    capture(paused);
+    paused.start();
+    paused.fill('BUY');
+    paused.market(4_000, 92, 92.1);
+    paused.fill('SELL');
+    paused.feed({ t: 'command', ts: paused.ts + 1, command: 'pause' });
+    paused.market(65_000, 92, 92.1);
+    expect(wdStatus(paused.outs)).toEqual([]);
+
+    // Unreconciled: a PENDING withdrawal whose books are no longer confirmed is aborted, not sent.
+    const unsynced = new Harness(new LiveEngine(wOpts));
+    const ur = capture(unsynced);
+    profitable(unsynced);
+    unsynced.market(2_000, 92, 92.1);
+    expect(ur[0]).toMatchObject({ mode: 'submit' });
+    unsynced.autoSync = false; // syncs stop answering
+    unsynced.stream(false);
+    unsynced.stream(true);
+    unsynced.market(61_000, 92, 92.1);
+    expect(unsynced.engine.venueHold).toBe('syncing');
+    expect(ur.at(-1)).toMatchObject({ id: ur[0]!.id, mode: 'abort' });
+
+    const small = new Harness(new LiveEngine({ ...opts, treasury: { withdraw: { minAmount: 20, dailyCap: 100 } } }));
+    capture(small);
+    profitable(small);
+    small.market(5_000, 92, 92.1);
+    expect(bal(small, 'treasury')).toBe('0.04');
+    expect(wdStatus(small.outs)).toEqual([]);
+
+    const under = new Harness(new LiveEngine(wOpts));
+    capture(under);
+    under.start();
+    under.fill('BUY');
+    under.market(4_000, 92, 92.1);
+    under.fill('SELL');
+    under.market(1_000, 92, 92.1);
+    under.fill('BUY');
+    under.market(65_000, 80, 80.1); // inventory under water: equity < principal
+    expect(wdStatus(under.outs)).toEqual([]);
+  });
+
+  it('a PENDING withdrawal is aborted (never submitted) when a lock closes before it was sent', () => {
+    const h = new Harness(new LiveEngine(wOpts));
+    const reqs = capture(h);
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    expect(reqs).toHaveLength(1);
+    h.feed({ t: 'command', ts: h.ts + 1, command: 'pause' });
+    h.market(61_000, 92, 92.1);
+    expect(reqs.at(-1)).toMatchObject({ id: reqs[0]!.id, mode: 'abort' });
+    h.withdrawAnswer({ id: reqs[0]!.id, status: 'FAILED', reason: 'aborted' });
+    h.market(1_000, 92, 92.1);
+    expect(bal(h, 'treasury')).toBe('0.04');
+  });
+
+  it('impossible reports stop everything: CONFIRMED then FAILED, or a different amount', () => {
+    const conflict = new Harness(new LiveEngine(wOpts));
+    const reqs = capture(conflict);
+    profitable(conflict);
+    conflict.market(2_000, 92, 92.1);
+    const id = reqs[0]!.id;
+    conflict.quote = conflict.quote.minus('0.04');
+    conflict.withdrawAnswer({ id, status: 'CONFIRMED', amount: '0.04', fee: '0' });
+    conflict.market(500, 92, 92.1);
+    conflict.withdrawAnswer({ id, status: 'FAILED', reason: 'late' });
+    conflict.market(1_000, 92, 92.1);
+    expect(conflict.engine.venueHold).toBe('fatal:withdraw_conflict');
+    expect(bal(conflict, 'treasury')).toBe('0'); // never "restored" after the money left
+    expect(bal(conflict, 'external')).toBe('0.04');
+
+    const amount = new Harness(new LiveEngine(wOpts));
+    const r2 = capture(amount);
+    profitable(amount);
+    amount.market(2_000, 92, 92.1);
+    amount.withdrawAnswer({ id: r2[0]!.id, status: 'CONFIRMED', amount: '4', fee: '0' });
+    amount.market(1_000, 92, 92.1);
+    expect(amount.engine.venueHold).toBe('fatal:withdraw_amount');
+    expect(bal(amount, 'withdrawing')).toBe('0.04'); // left for a human
+
+    const unknown = new Harness(new LiveEngine(wOpts));
+    profitable(unknown);
+    unknown.withdrawAnswer({ id: 'wdffffff-9', status: 'CONFIRMED' });
+    unknown.market(500, 92, 92.1);
+    expect(unknown.outs.some((o) => o.kind === 'exec_warning' && o.message.includes('unknown withdrawal'))).toBe(true);
+  });
+
+  it('daily cap and cooldown; the treasury view lists the buckets', () => {
+    const h = new Harness(new LiveEngine({ ...opts, treasury: { withdraw: { minAmount: 0.01, dailyCap: 0.02 } } }));
+    const reqs = capture(h);
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    expect(reqs[0]).toMatchObject({ amount: '0.02' }); // capped by the daily cap
+    expect(bal(h, 'treasury')).toBe('0.02');
+    h.quote = h.quote.minus('0.02');
+    h.withdrawAnswer({ id: reqs[0]!.id, status: 'CONFIRMED', amount: '0.02', fee: '0' });
+    h.market(3_600_000, 92, 92.1);
+    expect(wdStatus(h.outs).filter((x) => x === 'PENDING')).toHaveLength(1); // 1 per day
+    expect(h.engine.treasuryView()).toMatchObject({ treasury: '0.02', withdrawn: '0.02', skimmed: '0.04', withdrawing: '0' });
+  });
+
+  it('replay and restore are exact through a withdrawal in flight', () => {
+    const h = new Harness(new LiveEngine(wOpts));
+    const reqs = capture(h);
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    h.quote = h.quote.minus('0.04');
+    h.withdrawAnswer({ id: reqs[0]!.id, status: 'SENT', exchangeId: 'E1' });
+    h.market(5_000, 92, 92.1);
+    const snap = JSON.parse(JSON.stringify(h.engine.snapshot()));
+    const restored = LiveEngine.restore(wOpts, snap);
+    expect(restored.treasuryView()).toEqual(h.engine.treasuryView());
+    expect(() => LiveEngine.restore(opts, snap)).toThrow(/different configuration/);
+    h.withdrawAnswer({ id: reqs[0]!.id, status: 'CONFIRMED', amount: '0.04', fee: '0.01' });
+    h.market(65_000, 92, 92.1);
+    const replay = new LiveEngine(wOpts);
+    const outs = h.inputs.flatMap((r) => replay.process(r));
+    expect(crypto.createHash('sha256').update(JSON.stringify(outs)).digest('hex')).toBe(h.outputHash());
+    expect(replay.treasuryView()).toEqual(h.engine.treasuryView());
   });
 });

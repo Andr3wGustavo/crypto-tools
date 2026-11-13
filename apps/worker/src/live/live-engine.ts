@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import {
-  BN, Ledger, MarketMakerStrategy, NigEstimator, botTag, canonicalJson, captureState, restoreState,
-  type LedgerTransaction, type SimEvent, type StrategyConfig,
+  BN, DEFAULT_TREASURY, Ledger, MarketMakerStrategy, NigEstimator, TreasuryPolicy, WITHDRAWAL_TERMINAL, WithdrawalTransitionError,
+  botTag, canonicalJson, captureState, nextWithdrawalStatus, restoreState, withdrawalId,
+  type LedgerTransaction, type SimEvent, type StrategyConfig, type WithdrawalRecord,
 } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
 import { ENGINE_BEHAVIOR_VERSION, type EngineOutput, type EngineSnapshot, type InputRecord } from '../engine/shadow-engine';
@@ -19,7 +20,24 @@ export type LiveInputRecord =
    * REST snapshot taken by the reconciler AFTER injecting recent fills: open orders + balances.
    * `epoch` echoes the request: a snapshot from before the latest stream change is stale.
    */
-  | { t: 'sync'; ts: number; epoch: number; open: Array<{ clientOrderId: string; orderId: string }>; balances: Record<string, { free: string; locked: string }> };
+  | { t: 'sync'; ts: number; epoch: number; open: Array<{ clientOrderId: string; orderId: string }>; balances: Record<string, { free: string; locked: string }> }
+  /** The withdrawer's answer about one withdrawal request (see withdraw/withdrawer.ts). */
+  | { t: 'withdraw'; ts: number; id: string; status: 'SENT' | 'CONFIRMED' | 'FAILED'; amount?: string; fee?: string; exchangeId?: string; txId?: string; reason?: string };
+
+/**
+ * Ask the withdrawer about a withdrawal: `submit` it (only while every lock still passes),
+ * report its `status`, or `abort` it (never submitted => refused forever and reported FAILED).
+ * Re-sent periodically until the withdrawal is final: delivery is at-least-once, answers idempotent.
+ */
+export interface WithdrawRequest {
+  kind: 'withdraw_request';
+  ts: number;
+  id: string;
+  asset: string;
+  amount: string;
+  createdTs: number;
+  mode: 'submit' | 'status' | 'abort';
+}
 
 export type LiveRequest =
   | { kind: 'request'; ts: number; op: 'query' | 'cancel'; clientOrderId: string; reason: string }
@@ -32,7 +50,32 @@ export type LiveOutput =
   | { kind: 'sync'; ts: number; ok: boolean; reason: string; diffs: Array<{ asset: string; ledger: string; exchange: string }> }
   | { kind: 'exec_warning'; ts: number; message: string }
   /** A booked exchange fill, in the same shape as a simulated one (dashboard, alerts, fills page). */
-  | { kind: 'exec_fill'; event: Extract<SimEvent, { kind: 'fill' }> & { tradeId: string; isMaker: boolean } };
+  | { kind: 'exec_fill'; event: Extract<SimEvent, { kind: 'fill' }> & { tradeId: string; isMaker: boolean } }
+  | WithdrawRequest
+  /** A withdrawal was created or changed status. */
+  | { kind: 'withdrawal'; ts: number; w: WithdrawalRecord }
+  /** Profit moved cash -> treasury. Amounts are exact decimals in the quote asset. */
+  | { kind: 'treasury'; ts: number; skim: string; treasury: string; withdrawing: string; skimmed: string; withdrawn: string };
+
+export interface LiveTreasuryOptions {
+  /** Share of confirmed profit that stays in cash and compounds (the rest goes to the treasury). */
+  reinvestRatio?: number;
+  /** Smallest skim (quote units); skims are rounded down to this step. */
+  skimStep?: number;
+  /** Auto-withdrawal of the treasury. Absent => the treasury only accumulates. */
+  withdraw?: {
+    minAmount: number;
+    dailyCap: number;
+    cooldownMs?: number;
+    /** Never withdraw while equity is more than this fraction below its peak. */
+    maxDrawdown?: number;
+    /** Network minimum + fee (the withdrawer re-checks the exchange's live values). */
+    networkMin?: number;
+    networkFee?: number;
+    /** Re-ask the withdrawer about an unfinished withdrawal this often. */
+    askEveryMs?: number;
+  };
+}
 
 export interface LiveEngineOptions {
   config: StrategyConfig;
@@ -54,22 +97,41 @@ export interface LiveEngineOptions {
   clockHoldMs?: number;
   /** Ledger vs exchange tolerance (absolute). Default: quote 0.001, base half a step. */
   balanceTol?: { quote: number; base: number };
+  treasury?: LiveTreasuryOptions;
 }
 
-export const LIVE_ENGINE_VERSION = 1;
+/** Treasury options with defaults filled in (part of the configuration hash). */
+export function treasuryIdentity(t: LiveTreasuryOptions | undefined) {
+  const w = t?.withdraw;
+  return {
+    reinvestRatio: t?.reinvestRatio ?? DEFAULT_TREASURY.reinvestRatio,
+    skimStep: t?.skimStep ?? 0.01,
+    withdraw: w ? {
+      minAmount: w.minAmount, dailyCap: w.dailyCap, cooldownMs: w.cooldownMs ?? 24 * 3_600_000, maxDrawdown: w.maxDrawdown ?? 0.02,
+      networkMin: w.networkMin ?? 0, networkFee: w.networkFee ?? 0, askEveryMs: w.askEveryMs ?? 60_000,
+    } : null,
+  };
+}
+
+/** 2: treasury skim + withdrawals (E9). */
+export const LIVE_ENGINE_VERSION = 2;
 
 export function liveConfigHash(o: LiveEngineOptions): string {
   const id = {
     mode: 'live', v: ENGINE_BEHAVIOR_VERSION, live: LIVE_ENGINE_VERSION, config: o.config, capitalQuote: o.capitalQuote,
-    timerMs: o.timerMs ?? 1_000, edgeWindowMs: o.edgeWindowMs ?? 3_600_000,
+    timerMs: o.timerMs ?? 1_000, edgeWindowMs: o.edgeWindowMs ?? 3_600_000, treasury: treasuryIdentity(o.treasury),
   };
   return crypto.createHash('sha256').update(canonicalJson(id)).digest('hex');
 }
 
+type Dec = InstanceType<typeof BN>;
 const RECONCILE_TOL = 1e-9;
 const EPS = 1e-12;
 const ORDER_ID_MEMORY = 2_000;
-const SKIP = ['o', 'book', 'configHash', 'symbol', 'ourPrefix'] as const;
+const SKIP = ['o', 'book', 'configHash', 'symbol', 'ourPrefix', 'policy', 'tcfg'] as const;
+const SKIM_EVERY_MS = 60_000;
+const KEEP_FINAL_WITHDRAWALS = 50;
+type StrategyView = ReturnType<MarketMakerStrategy['snapshot']>;
 const OPEN_ORDER: ReadonlySet<string> = new Set(['NEW', 'PARTIALLY_FILLED']);
 
 /**
@@ -85,6 +147,12 @@ const OPEN_ORDER: ReadonlySet<string> = new Set(['NEW', 'PARTIALLY_FILLED']);
  *
  * The exchange is the source of truth: balances must match the ledger on two consecutive syncs,
  * otherwise the sticky reconciliation halt fires (same mechanism as shadow).
+ *
+ * Treasury (E9): confirmed profit is skimmed cash -> treasury (the strategy never trades it), and
+ * the treasury is withdrawn to the owner's wallet through the withdrawal FSM, with the reserve
+ * debited before the request and restored only on a definitive failure. On the exchange,
+ * cash + treasury + withdrawing is one quote balance; while a withdrawal is in flight the sync
+ * accepts that balance anywhere between "not yet debited" and "debited".
  */
 export class LiveEngine {
   readonly strategy: MarketMakerStrategy;
@@ -116,10 +184,31 @@ export class LiveEngine {
   private readonly lastQuery = new Map<string, number>();
   /** When we last asked the exchange to place / cancel each order (outcome timeout). */
   private readonly requestedAt = new Map<string, number>();
+  // ---- treasury (E9)
+  private readonly policy: TreasuryPolicy;
+  private readonly tcfg: ReturnType<typeof treasuryIdentity>;
+  /** Quote value deposited at opening: equity at or above it means every treasury unit is profit. */
+  private principal: number | undefined;
+  /** Exact total ever skimmed cash -> treasury (includes what was withdrawn since). */
+  private skimmed = '0';
+  private nextSkim = Number.NEGATIVE_INFINITY;
+  private skims = 0;
+  private wdSeq = 0;
+  private withdrawals: WithdrawalRecord[] = [];
+  private lastWithdrawAsk = Number.NEGATIVE_INFINITY;
+  private lastSyncOkTs = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly o: LiveEngineOptions) {
     this.strategy = new MarketMakerStrategy(o.config, { quote: o.capitalQuote, base: 0 });
     this.configHash = liveConfigHash(o);
+    this.tcfg = treasuryIdentity(o.treasury);
+    const w = this.tcfg.withdraw;
+    this.policy = new TreasuryPolicy({
+      ...DEFAULT_TREASURY,
+      reinvestRatio: this.tcfg.reinvestRatio,
+      promotion: { ...DEFAULT_TREASURY.promotion, enabled: false },
+      withdrawal: w ? { minAmount: w.minAmount, cooldownMs: w.cooldownMs, dailyCap: w.dailyCap, floor: 0 } : DEFAULT_TREASURY.withdrawal,
+    });
     this.symbol = `${o.config.base}${o.config.quote}`.toUpperCase();
     this.ourPrefix = `cf${botTag(o.config.botId)}`;
   }
@@ -145,6 +234,18 @@ export class LiveEngine {
     return this.opened;
   }
 
+  /** Treasury buckets (exact decimals, quote asset) and the withdrawals still remembered. */
+  treasuryView() {
+    const q = this.o.config.quote;
+    return {
+      asset: q,
+      cash: this.book.balance(`cash:${q}`, q).toFixed(),
+      ...this.buckets(),
+      principal: this.principal ?? null,
+      withdrawals: this.withdrawals.map((w) => ({ ...w })),
+    };
+  }
+
   process(r: LiveInputRecord): LiveOutput[] {
     const out: LiveOutput[] = [];
     this.records++;
@@ -154,6 +255,7 @@ export class LiveEngine {
       this.feed({ kind: 'timer', ts: r.ts }, out);
       this.edgeTick(r.ts, out);
       this.periodic(r.ts, out);
+      this.treasuryTick(r.ts, out);
     }
     switch (r.t) {
       case 'book':
@@ -186,6 +288,9 @@ export class LiveEngine {
         break;
       case 'sync':
         this.onSync(r, out);
+        break;
+      case 'withdraw':
+        this.onWithdraw(r, out);
         break;
     }
     if (this.syncPending && this.streamUp && r.ts - this.lastSyncRequest >= (this.o.resyncEveryMs ?? 15_000)) this.requestSync(r.ts, 'sync still needed', out);
@@ -368,6 +473,8 @@ export class LiveEngine {
       this.book.post(Ledger.deposit('open-quote', ts, quote, q));
       if (!b.isZero()) this.book.post(Ledger.deposit('open-base', ts, base, b));
       this.feed({ kind: 'balances', ts, quote: q.toNumber(), base: b.toNumber() }, out);
+      this.principal = q.plus(b.times(this.lastMid)).toNumber();
+      this.lastSyncOkTs = ts;
       this.opened = true;
       this.syncPending = false;
       this.nextSync = ts + (this.o.syncEveryMs ?? 60_000);
@@ -377,13 +484,18 @@ export class LiveEngine {
     const tol = this.o.balanceTol ?? { quote: 0.001, base: Number(this.o.config.rules.stepSize) / 2 };
     const diffs: Array<{ asset: string; ledger: string; exchange: string }> = [];
     for (const [asset, ex, t] of [[quote, q, tol.quote], [base, b, tol.base]] as const) {
-      const l = this.book.balance(`cash:${asset}`, asset);
-      if (l.minus(ex).abs().gt(t)) diffs.push({ asset, ledger: l.toFixed(), exchange: ex.toFixed() });
+      // On the exchange, cash + treasury + reserved withdrawals are one balance. A reserved
+      // withdrawal may already be debited (or not yet): accept anything in between.
+      const l = this.onExchange(asset);
+      const inFlight = this.book.balance(`withdrawing:${asset}`, asset);
+      const ok = ex.gte(l.minus(inFlight).minus(t)) && ex.lte(l.plus(t));
+      if (!ok) diffs.push({ asset, ledger: inFlight.isZero() ? l.toFixed() : `${l.minus(inFlight).toFixed()}..${l.toFixed()}`, exchange: ex.toFixed() });
     }
     this.nextSync = ts + (this.o.syncEveryMs ?? 60_000);
     if (diffs.length === 0) {
       this.divergentSyncs = 0;
       this.syncPending = false;
+      this.lastSyncOkTs = ts;
       out.push({ kind: 'sync', ts, ok: true, reason: 'balanced', diffs });
       return;
     }
@@ -395,6 +507,173 @@ export class LiveEngine {
       this.diverge(ts, out, diffs.map((d) => d.asset));
     } else {
       this.resync(ts, 'balance mismatch', out);
+    }
+  }
+
+  // ------------------------------------------------------------------ treasury (E9)
+
+  private onExchange(asset: string): Dec {
+    return this.book.balance(`cash:${asset}`, asset).plus(this.book.balance(`treasury:${asset}`, asset)).plus(this.book.balance(`withdrawing:${asset}`, asset));
+  }
+
+  /** Trading is healthy and the books were just confirmed by the exchange. */
+  private quiet(ts: number): boolean {
+    return this.opened && this.hold === null && this.fatal === null && !this.reconcileDiverged && !this.syncPending
+      && ts - this.lastSyncOkTs <= 2.5 * (this.o.syncEveryMs ?? 60_000);
+  }
+
+  private treasuryTick(ts: number, out: LiveOutput[]): void {
+    if (this.principal === undefined) return;
+    const s = this.strategy.snapshot();
+    if (ts >= this.nextSkim && this.quiet(ts) && s.status === 'running' && s.equity !== undefined) {
+      this.nextSkim = ts + SKIM_EVERY_MS;
+      this.skim(ts, s, out);
+    }
+    this.withdrawTick(ts, this.strategy.snapshot(), out);
+  }
+
+  private skim(ts: number, s: StrategyView, out: LiveOutput[]): void {
+    const quote = this.o.config.quote;
+    // Quote committed to resting buys must stay in cash (a fill would otherwise overdraw it).
+    let committed = 0;
+    for (const wo of s.workingOrders) if (wo.side === 'BUY') committed += (wo.qty - wo.filled) * wo.price;
+    const skimmed = Number(this.skimmed);
+    const due = this.policy.skimDue({
+      realizedPnl: s.realizedPnl, profitToDate: s.equity! + skimmed - this.principal!, skimmed,
+      spare: s.quoteTotal - committed, step: this.tcfg.skimStep,
+    });
+    if (!(due > 0)) return;
+    const amount = new BN(due).decimalPlaces(8, BN.ROUND_DOWN);
+    const id = `skim-${this.skims + 1}`;
+    try {
+      this.book.post(Ledger.transfer(id, ts, 'treasury_split', 'cash', 'treasury', quote, amount));
+    } catch (err) {
+      out.push({ kind: 'exec_warning', ts, message: `skim ${amount.toFixed()} refused by the ledger: ${(err as Error).message}` });
+      return;
+    }
+    this.skims++;
+    this.skimmed = new BN(this.skimmed).plus(amount).toFixed();
+    out.push({ kind: 'ledger', txId: id });
+    this.feed({ kind: 'transfer', ts, quote: -amount.toNumber(), reason: 'treasury_skim' }, out);
+    // The edge measures trading returns: a transfer is not one.
+    if (this.windowStart) this.windowStart = { ts: this.windowStart.ts, equity: this.windowStart.equity - amount.toNumber() };
+    out.push({ kind: 'treasury', ts, skim: amount.toFixed(), ...this.buckets() });
+    this.reconcile(ts, out);
+  }
+
+  private buckets() {
+    const q = this.o.config.quote;
+    return {
+      treasury: this.book.balance(`treasury:${q}`, q).toFixed(), withdrawing: this.book.balance(`withdrawing:${q}`, q).toFixed(),
+      skimmed: this.skimmed, withdrawn: this.book.balance(`external:${q}`, q).toFixed(),
+    };
+  }
+
+  /** The five locks (+ one withdrawal in flight at a time); see TreasuryPolicy.withdrawalDecision. */
+  private withdrawLocks(ts: number, s: StrategyView) {
+    const w = this.tcfg.withdraw!;
+    const quote = this.o.config.quote;
+    // Cooldown counts every attempt (a failure is retried a day later, never in a loop); the daily
+    // cap counts only money that may actually have left.
+    const counted = this.withdrawals.filter((x) => x.status !== 'FAILED');
+    const last = this.withdrawals.length > 0 ? Math.max(...this.withdrawals.map((x) => x.createdTs)) : undefined;
+    const equity = s.equity;
+    const drawdownOk = equity !== undefined && s.peakEquity > 0 && 1 - equity / s.peakEquity <= w.maxDrawdown;
+    return this.policy.withdrawalDecision(this.book.balance(`treasury:${quote}`, quote).toNumber(), {
+      mode: 'live',
+      halted: this.fatal !== null || this.reconcileDiverged || s.status !== 'running' || this.hold !== null,
+      inFlight: this.withdrawals.some((x) => !WITHDRAWAL_TERMINAL.has(x.status)),
+      reconcileOk: this.quiet(ts),
+      // Cash equity at or above the principal => everything in the treasury is net profit.
+      equityConfirmed: drawdownOk && equity !== undefined && this.principal !== undefined && equity >= this.principal,
+      now: ts,
+      ...(last !== undefined ? { lastWithdrawalTs: last } : {}),
+      withdrawnLast24h: counted.filter((x) => ts - x.createdTs < 24 * 3_600_000).reduce((a, x) => a + Number(x.amount), 0),
+      networkMin: w.networkMin,
+      networkFee: w.networkFee,
+    });
+  }
+
+  private withdrawTick(ts: number, s: StrategyView, out: LiveOutput[]): void {
+    const w = this.tcfg.withdraw;
+    const open = this.withdrawals.find((x) => !WITHDRAWAL_TERMINAL.has(x.status));
+    if (open) {
+      if (ts - this.lastWithdrawAsk < (w?.askEveryMs ?? 60_000)) return;
+      this.lastWithdrawAsk = ts;
+      // A PENDING one is submitted only while the safety locks still pass; otherwise it is aborted.
+      let mode: WithdrawRequest['mode'] = 'status';
+      if (open.status === 'PENDING') {
+        const safety = new Set(['halted', 'reconcile_pending', 'equity_unconfirmed', 'not_live']);
+        const blocking = w ? this.withdrawLocks(ts, s).reasons.filter((r) => safety.has(r)) : ['disabled'];
+        mode = blocking.length === 0 ? 'submit' : 'abort';
+      }
+      out.push({ kind: 'withdraw_request', ts, id: open.id, asset: open.asset, amount: open.amount, createdTs: open.createdTs, mode });
+      return;
+    }
+    if (!w || this.principal === undefined) return;
+    const d = this.withdrawLocks(ts, s);
+    if (!d.allowed) return;
+    const quote = this.o.config.quote;
+    const amount = new BN(d.amount).decimalPlaces(2, BN.ROUND_DOWN);
+    if (!amount.gt(0)) return;
+    const id = withdrawalId(botTag(this.o.config.botId), this.wdSeq + 1);
+    try {
+      this.book.post(Ledger.transfer(`${id}-reserve`, ts, 'withdrawal_reserve', 'treasury', 'withdrawing', quote, amount));
+    } catch (err) {
+      out.push({ kind: 'exec_warning', ts, message: `withdrawal reserve refused by the ledger: ${(err as Error).message}` });
+      return;
+    }
+    this.wdSeq++;
+    const rec: WithdrawalRecord = { id, asset: quote, amount: amount.toFixed(), status: 'PENDING', createdTs: ts, updatedTs: ts };
+    this.withdrawals.push(rec);
+    this.lastWithdrawAsk = ts;
+    out.push({ kind: 'ledger', txId: `${id}-reserve` });
+    out.push({ kind: 'withdrawal', ts, w: { ...rec } });
+    out.push({ kind: 'withdraw_request', ts, id, asset: quote, amount: rec.amount, createdTs: ts, mode: 'submit' });
+  }
+
+  private onWithdraw(r: Extract<LiveInputRecord, { t: 'withdraw' }>, out: LiveOutput[]): void {
+    const ts = r.ts;
+    const rec = this.withdrawals.find((x) => x.id === r.id);
+    if (!rec) {
+      out.push({ kind: 'exec_warning', ts, message: `withdrawer reported unknown withdrawal ${r.id} (${r.status})` });
+      return;
+    }
+    let next: ReturnType<typeof nextWithdrawalStatus>;
+    try {
+      next = nextWithdrawalStatus(rec.status, r.status);
+    } catch (err) {
+      if (!(err instanceof WithdrawalTransitionError)) throw err;
+      return this.setFatal('withdraw_conflict', ts, out, `${r.id}: ${err.message}`);
+    }
+    if (r.exchangeId) rec.exchangeId = r.exchangeId;
+    if (r.txId) rec.txId = r.txId;
+    if (next === 'same') return;
+    const asset = rec.asset;
+    if (next === 'CONFIRMED') {
+      if (r.amount !== undefined && !new BN(r.amount).eq(rec.amount)) {
+        return this.setFatal('withdraw_amount', ts, out, `${r.id}: exchange reports ${r.amount}, reserved ${rec.amount}`);
+      }
+      const fee = r.fee ?? '0';
+      try {
+        this.book.post(Ledger.withdrawal(`${rec.id}-settle`, ts, asset, rec.amount, fee, 'withdrawing'));
+      } catch (err) {
+        return this.setFatal('withdraw_settle', ts, out, `${r.id}: ${(err as Error).message}`);
+      }
+      rec.fee = new BN(fee).toFixed();
+      out.push({ kind: 'ledger', txId: `${rec.id}-settle` });
+    } else if (next === 'FAILED') {
+      this.book.post(Ledger.transfer(`${rec.id}-release`, ts, 'withdrawal_release', 'withdrawing', 'treasury', asset, rec.amount));
+      out.push({ kind: 'ledger', txId: `${rec.id}-release` });
+    }
+    rec.status = next;
+    rec.updatedTs = ts;
+    if (r.reason) rec.reason = r.reason;
+    out.push({ kind: 'withdrawal', ts, w: { ...rec } });
+    if (WITHDRAWAL_TERMINAL.has(next)) {
+      this.nextSync = Math.min(this.nextSync, ts); // money moved: confirm the books on the next tick
+      const done = this.withdrawals.filter((x) => WITHDRAWAL_TERMINAL.has(x.status));
+      if (done.length > KEEP_FINAL_WITHDRAWALS) this.withdrawals = this.withdrawals.filter((x) => x !== done[0]);
     }
   }
 
@@ -552,4 +831,5 @@ export class LiveEngine {
   }
 }
 
-export const LIVE_STATE_VERSION = 1;
+/** 2: treasury fields (E9). */
+export const LIVE_STATE_VERSION = 2;

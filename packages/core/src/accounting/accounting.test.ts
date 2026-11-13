@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TREASURY, TreasuryPolicy, type WithdrawalContext } from '../treasury/treasury';
 import { DEFAULT_LADDER, daysToTarget, stageFor, viability } from '../treasury/ladder';
+import { WITHDRAWAL_ID, WithdrawalTransitionError, nextWithdrawalStatus, withdrawalId } from '../treasury/withdrawal';
 import { InsufficientFundsError, Ledger, LedgerImbalanceError, assertBalanced } from './ledger';
 import { AverageCostPosition, OversellError } from './position';
 
@@ -111,6 +112,60 @@ describe('TreasuryPolicy', () => {
     expect(t.withdrawalDecision(25, { ...ctx, lastWithdrawalTs: ctx.now - 3600_000 }).reasons).toContain('cooldown');
     expect(t.withdrawalDecision(500, { ...ctx, withdrawnLast24h: 100 }).reasons).toContain('daily_cap');
     expect(t.withdrawalDecision(500, ctx).amount).toBe(100); // capped by daily cap
+    expect(t.withdrawalDecision(25, { ...ctx, inFlight: true }).reasons).toEqual(['in_flight']);
+    expect(t.withdrawalDecision(25, { ...ctx, equityConfirmed: false }).reasons).toEqual(['equity_unconfirmed']);
+    expect(t.withdrawalDecision(25, { ...ctx, networkMin: 24, networkFee: 2 }).reasons).toEqual(['below_minimum']);
+  });
+
+  it('live skim: only profit both realized and confirmed by equity, never given back, capped by spare cash', () => {
+    const base = { realizedPnl: 1, profitToDate: 1, skimmed: 0, spare: 10 };
+    expect(t.skimDue(base)).toBe(0.5);
+    expect(t.skimDue({ ...base, profitToDate: 0.3 })).toBe(0.15); // MTM says less than realized
+    expect(t.skimDue({ ...base, realizedPnl: 0.2 })).toBe(0.1); // unrealized gains do not count
+    expect(t.skimDue({ ...base, skimmed: 0.5 })).toBe(0); // already skimmed
+    expect(t.skimDue({ ...base, skimmed: 0.7 })).toBe(0); // losses since: nothing comes back
+    expect(t.skimDue({ ...base, realizedPnl: -1 })).toBe(0);
+    expect(t.skimDue({ ...base, spare: 0.2 })).toBe(0.2);
+    expect(t.skimDue({ ...base, realizedPnl: 0.0874, profitToDate: 0.0874 })).toBe(0.04); // rounded down to the cent
+    expect(t.skimDue({ ...base, realizedPnl: 0.019, profitToDate: 0.019 })).toBe(0); // below one step
+  });
+});
+
+describe('Withdrawal FSM', () => {
+  it('PENDING → SENT → CONFIRMED | FAILED; repeats are idempotent; terminal states never change', () => {
+    expect(nextWithdrawalStatus('PENDING', 'SENT')).toBe('SENT');
+    expect(nextWithdrawalStatus('PENDING', 'FAILED')).toBe('FAILED');
+    expect(nextWithdrawalStatus('PENDING', 'CONFIRMED')).toBe('CONFIRMED'); // the SENT report was lost
+    expect(nextWithdrawalStatus('SENT', 'CONFIRMED')).toBe('CONFIRMED');
+    expect(nextWithdrawalStatus('SENT', 'FAILED')).toBe('FAILED');
+    expect(nextWithdrawalStatus('SENT', 'SENT')).toBe('same');
+    expect(nextWithdrawalStatus('CONFIRMED', 'CONFIRMED')).toBe('same');
+    for (const [a, b] of [['CONFIRMED', 'FAILED'], ['FAILED', 'CONFIRMED'], ['SENT', 'PENDING'], ['FAILED', 'SENT']] as const) {
+      expect(() => nextWithdrawalStatus(a, b)).toThrow(WithdrawalTransitionError);
+    }
+    expect(withdrawalId('ab12cd', 7)).toBe('wdab12cd-7');
+    expect(WITHDRAWAL_ID.test('wdab12cd-7')).toBe(true);
+    expect(WITHDRAWAL_ID.test('wd-7; DROP')).toBe(false);
+  });
+
+  it('ledger: reserve → settle (fee inside the amount) or release; the reserve is never negative', () => {
+    const l = new Ledger();
+    l.post(Ledger.deposit('d', 0, 'USDT', 30));
+    l.post(Ledger.transfer('s', 1, 'treasury_split', 'cash', 'treasury', 'USDT', 22));
+    l.post(Ledger.transfer('r1', 2, 'withdrawal_reserve', 'treasury', 'withdrawing', 'USDT', 21));
+    expect(l.balance('treasury:USDT', 'USDT').toFixed()).toBe('1');
+    expect(l.equity('USDT', {})).toBe(30); // still on the exchange
+    l.post(Ledger.withdrawal('w1', 3, 'USDT', 21, 1, 'withdrawing'));
+    expect(l.balance('withdrawing:USDT', 'USDT').toFixed()).toBe('0');
+    expect(l.balance('external:USDT', 'USDT').toFixed()).toBe('20');
+    expect(l.balance('expense:fees:USDT', 'USDT').toFixed()).toBe('1');
+    expect(l.equity('USDT', {})).toBe(9);
+    expect(() => l.post(Ledger.withdrawal('w2', 4, 'USDT', 1, 0, 'withdrawing'))).toThrow(InsufficientFundsError);
+    expect(() => Ledger.withdrawal('w3', 4, 'USDT', 0, 0)).toThrow(RangeError);
+    l.post(Ledger.transfer('r2', 5, 'withdrawal_reserve', 'treasury', 'withdrawing', 'USDT', 1));
+    l.post(Ledger.transfer('x2', 6, 'withdrawal_release', 'withdrawing', 'treasury', 'USDT', 1));
+    expect(l.balance('treasury:USDT', 'USDT').toFixed()).toBe('1');
+    for (const v of l.totals().values()) expect(v.isZero()).toBe(true);
   });
 });
 

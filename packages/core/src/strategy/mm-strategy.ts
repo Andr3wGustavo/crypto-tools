@@ -127,6 +127,9 @@ export class MarketMakerStrategy {
       case 'venue':
         this.onVenue(e.ts, e.hold, out);
         break;
+      case 'transfer':
+        this.onTransfer(e, out);
+        break;
     }
     return out;
   }
@@ -222,6 +225,19 @@ export class MarketMakerStrategy {
     this.venueHold = hold;
     out.push({ kind: 'status', ts, status: this.status, quoting: this.canQuote(), reason: hold === null ? 'venue_ok' : `venue_hold:${hold}` });
     this.quote(ts, out, true);
+  }
+
+  private onTransfer(e: Extract<StrategyEvent, { kind: 'transfer' }>, out: StrategyAction[]): void {
+    if (!Number.isFinite(e.quote) || this.quoteTotal + e.quote < -EPS) {
+      out.push({ kind: 'error', ts: e.ts, message: `transfer ${e.quote} refused (quote ${this.quoteTotal})` });
+      return;
+    }
+    this.quoteTotal = Math.max(0, this.quoteTotal + e.quote);
+    // Moving money is not a gain or a loss: shift every equity reference by the same amount.
+    if (this.startEquity !== undefined) this.startEquity += e.quote;
+    this.peakEquity += e.quote;
+    this.dayStartEquity += e.quote;
+    this.quote(e.ts, out, true);
   }
 
   // ------------------------------------------------------------------ risk

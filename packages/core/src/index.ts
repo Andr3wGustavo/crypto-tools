@@ -13,6 +13,7 @@ export * from './risk/risk-manager';
 export * from './accounting/ledger';
 export * from './accounting/position';
 export * from './treasury/treasury';
+export * from './treasury/withdrawal';
 export * from './treasury/ladder';
 export * from './orders/fsm';
 export * from './sim/sim-executor';

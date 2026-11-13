@@ -195,6 +195,27 @@ describe('live hooks: venue hold and unknown order state (never exercised in sha
     return { s, h, all };
   }
 
+  it('a treasury transfer moves quote out without looking like a loss (risk references shift too)', () => {
+    const { s, h } = quoting();
+    const before = s.snapshot();
+    expect(before.status).toBe('running');
+    const out = h({ kind: 'transfer', ts: 12_500, quote: -5, reason: 'treasury_skim' });
+    const after = s.snapshot();
+    expect(after.quoteTotal).toBeCloseTo(before.quoteTotal - 5, 12);
+    expect(after.startEquity! - before.startEquity!).toBeCloseTo(-5, 12);
+    expect(after.peakEquity - before.peakEquity).toBeCloseTo(-5, 12);
+    expect(after.realizedPnl).toBe(before.realizedPnl);
+    expect(out.filter((a) => a.kind === 'error')).toEqual([]);
+    // A large skim relative to equity would breach drawdown limits if it were counted as a loss.
+    h({ kind: 'transfer', ts: 12_600, quote: -8, reason: 'treasury_skim' });
+    h({ kind: 'timer', ts: 13_000 });
+    expect(s.snapshot().status).toBe('running');
+    // More than the balance is refused (never negative).
+    const bad = h({ kind: 'transfer', ts: 13_100, quote: -100, reason: 'treasury_skim' });
+    expect(bad.find((a) => a.kind === 'error')).toBeDefined();
+    expect(s.snapshot().quoteTotal).toBeCloseTo(before.quoteTotal - 13, 12);
+  });
+
   it('a venue hold cancels everything and blocks quoting until released', () => {
     const { s, h } = quoting();
     const working = s.snapshot().workingOrders;
