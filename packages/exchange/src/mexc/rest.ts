@@ -114,6 +114,70 @@ export function classifyMexcError(err: unknown): MexcFailure {
 /** The exchange does not know this order (never placed, or already gone): resolve by query. */
 export const isUnknownOrder = (err: unknown): boolean => err instanceof MexcRestError && err.code !== undefined && UNKNOWN_ORDER_CODES.has(err.code);
 
+// ---------------- wallet (withdrawals, phase E9) ----------------
+
+/** One network of a coin (GET /api/v3/capital/config/getall). `netWork` is the new field name. */
+export interface MexcCoinNetwork {
+  coin?: string;
+  network?: string;
+  netWork?: string;
+  withdrawEnable?: boolean;
+  withdrawFee?: string;
+  withdrawMin?: string;
+  withdrawMax?: string;
+  withdrawIntegerMultiple?: string | null;
+  sameAddress?: boolean;
+}
+
+export interface MexcCoinConfig {
+  coin: string;
+  networkList?: MexcCoinNetwork[];
+}
+
+/** GET /api/v3/capital/withdraw/history row. */
+export interface MexcWithdrawRow {
+  id: string;
+  withdrawOrderId?: string | null;
+  remark?: string | null;
+  address: string;
+  memo?: string | null;
+  amount: string;
+  applyTime: number;
+  coin: string;
+  network?: string;
+  status: number;
+  transactionFee?: string;
+  txId?: string | null;
+  transHash?: string | null;
+}
+
+export interface MexcWithdrawAddress {
+  coin: string;
+  network?: string;
+  address: string;
+  addressTag?: string;
+  memo?: string | null;
+}
+
+/** MEXC withdraw status codes. */
+export const MEXC_WITHDRAW_STATUS: Readonly<Record<number, string>> = {
+  1: 'APPLY', 2: 'AUDITING', 3: 'WAIT', 4: 'PROCESSING', 5: 'WAIT_PACKAGING', 6: 'WAIT_CONFIRM', 7: 'SUCCESS', 8: 'FAILED', 9: 'CANCEL', 10: 'MANUAL',
+};
+
+/**
+ * Only SUCCESS is success and only FAILED / CANCEL are failures. Everything else — including a
+ * code we do not know — is still in progress (never read an unknown state as "failed": that
+ * would release the reserve of money that may still leave).
+ */
+export function mexcWithdrawOutcome(status: number): 'in_progress' | 'success' | 'failed' {
+  if (status === 7) return 'success';
+  if (status === 8 || status === 9) return 'failed';
+  return 'in_progress';
+}
+
+/** Network name of a coin network row (new field first). */
+export const networkName = (n: MexcCoinNetwork): string => n.netWork ?? n.network ?? '';
+
 /** Order as returned by query / cancel / openOrders (GET/DELETE /api/v3/order, /api/v3/openOrders). */
 export interface MexcOrderRaw {
   symbol: string;
@@ -276,6 +340,49 @@ export class MexcRest {
 
   account() {
     return this.request<{ canTrade?: boolean; canWithdraw?: boolean; canDeposit?: boolean; permissions?: string[]; balances: Array<{ asset: string; free: string; locked: string }> }>('GET', '/api/v3/account', {}, true);
+  }
+
+  // ---------------- wallet (withdraw key only, phase E9) ----------------
+
+  /** Coins and their networks: withdraw enabled / fee / minimum / maximum. */
+  coinConfig() {
+    return this.request<MexcCoinConfig[]>('GET', '/api/v3/capital/config/getall', {}, true);
+  }
+
+  /**
+   * Withdraws `amount` (the exchange deducts its fee from it) to an address of the account's
+   * withdrawal address book. `withdrawOrderId` is our idempotency key; it is also sent as the
+   * remark so the history can be matched even if the id is not echoed back.
+   */
+  async withdraw(p: { coin: string; netWork: string; address: string; amount: string; withdrawOrderId: string; memo?: string }): Promise<{ id: string }> {
+    const r = await this.request<{ id?: string | number }>('POST', '/api/v3/capital/withdraw', {
+      coin: p.coin, netWork: p.netWork, address: p.address, amount: p.amount, withdrawOrderId: p.withdrawOrderId, remark: p.withdrawOrderId,
+      ...(p.memo ? { memo: p.memo } : {}),
+    }, true);
+    if (r.id === undefined || r.id === null || String(r.id) === '') throw new MexcRestError('MEXC accepted the withdrawal but returned no id', 200);
+    return { id: String(r.id) };
+  }
+
+  /** Withdrawals of `coin` (window ≤ 7 days; default: the last 7 days). */
+  async withdrawHistory(coin: string, startTime?: number, endTime?: number, limit = 1_000): Promise<MexcWithdrawRow[]> {
+    const r = await this.request<MexcWithdrawRow[] | { data?: MexcWithdrawRow[] }>('GET', '/api/v3/capital/withdraw/history', {
+      coin, limit: Math.min(1_000, Math.max(1, limit)), ...(startTime !== undefined ? { startTime } : {}), ...(endTime !== undefined ? { endTime } : {}),
+    }, true);
+    const rows = Array.isArray(r) ? r : r.data ?? [];
+    return rows.map((x) => ({ ...x, id: String(x.id), status: Number(x.status) }));
+  }
+
+  /** The account's withdrawal address book for `coin` (all pages). */
+  async withdrawAddresses(coin: string): Promise<MexcWithdrawAddress[]> {
+    const out: MexcWithdrawAddress[] = [];
+    for (let page = 1; page <= 20; page++) {
+      const r = await this.request<MexcWithdrawAddress[] | { data?: MexcWithdrawAddress[]; totalPageNum?: number }>('GET', '/api/v3/capital/withdraw/address', { coin, page, limit: 50 }, true);
+      const rows = Array.isArray(r) ? r : r.data ?? [];
+      out.push(...rows);
+      const pages = Array.isArray(r) ? 1 : Number(r.totalPageNum ?? 1);
+      if (rows.length === 0 || page >= pages) break;
+    }
+    return out;
   }
 
   // ---------------- user data stream (listenKey: valid 60 min, extended by each keepalive) ----------------

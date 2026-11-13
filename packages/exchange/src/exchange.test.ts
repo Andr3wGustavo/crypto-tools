@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mapBinanceCombined } from './binance/market-stream';
 import { decodeMexcPush, encodeMexcPush, mexcChannels } from './mexc/codec';
 import { mapMexcPush } from './mexc/market-stream';
-import { MexcRest, MexcRestError, classifyMexcError, isUnknownOrder, mexcSymbolInfo, signMexc } from './mexc/rest';
+import { MexcRest, MexcRestError, classifyMexcError, isUnknownOrder, mexcSymbolInfo, mexcWithdrawOutcome, signMexc } from './mexc/rest';
 import type { BookTick, TradeTick } from './types';
 
 describe('MEXC protobuf codec', () => {
@@ -113,5 +113,34 @@ describe('MEXC REST failure semantics (what a failed order request means)', () =
     expect(calls.every((c) => c.url.startsWith('https://api.mexc.com/api/v3/userDataStream?') && /signature=[0-9a-f]{64}$/.test(c.url))).toBe(true);
     expect(calls[1]!.url).toContain(`listenKey=${key}`);
     await expect(new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: reply(200, {}) }).createListenKey()).rejects.toThrow(/no valid listenKey/);
+  });
+
+  it('wallet: withdraw is signed with our idempotency id (also as remark); history and address book parse', async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    const bodies: Record<string, unknown> = {
+      '/api/v3/capital/withdraw': { id: 7781 },
+      '/api/v3/capital/withdraw/history': [{ id: 7781, withdrawOrderId: null, remark: 'wdab12cd-1', address: 'Addr', amount: '20', applyTime: 5, coin: 'USDT', status: '6', transactionFee: '1' }],
+      '/api/v3/capital/withdraw/address': { data: [{ coin: 'USDT', network: 'Solana(SOL)', address: 'Addr' }], totalPageNum: 1 },
+    };
+    const f = (async (url: string, init: { method: string }) => {
+      calls.push({ method: init.method, url });
+      const path = new URL(url).pathname;
+      return new Response(JSON.stringify(bodies[path] ?? {}), { status: 200 });
+    }) as unknown as typeof fetch;
+    const rest = new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: f });
+    expect(await rest.withdraw({ coin: 'USDT', netWork: 'SOL', address: 'Addr', amount: '20', withdrawOrderId: 'wdab12cd-1' })).toEqual({ id: '7781' });
+    const w = new URL(calls[0]!.url);
+    expect(calls[0]!.method).toBe('POST');
+    expect(Object.fromEntries(['coin', 'netWork', 'address', 'amount', 'withdrawOrderId', 'remark'].map((k) => [k, w.searchParams.get(k)])))
+      .toEqual({ coin: 'USDT', netWork: 'SOL', address: 'Addr', amount: '20', withdrawOrderId: 'wdab12cd-1', remark: 'wdab12cd-1' });
+    expect(w.searchParams.get('signature')).toMatch(/^[0-9a-f]{64}$/);
+    const h = await rest.withdrawHistory('USDT', 1, 2);
+    expect(h[0]).toMatchObject({ id: '7781', status: 6, remark: 'wdab12cd-1' });
+    expect((await rest.withdrawAddresses('USDT')).map((a) => a.address)).toEqual(['Addr']);
+    await expect(new MexcRest({ apiKey: 'k', apiSecret: 's', fetchImpl: reply(200, {}) }).withdraw({ coin: 'USDT', netWork: 'SOL', address: 'A', amount: '1', withdrawOrderId: 'x' })).rejects.toThrow(/no id/);
+    // Only SUCCESS / FAILED / CANCEL are final; anything else (even an unknown code) is in progress.
+    expect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 42].map(mexcWithdrawOutcome)).toEqual([
+      'in_progress', 'in_progress', 'in_progress', 'in_progress', 'in_progress', 'in_progress', 'success', 'failed', 'failed', 'in_progress', 'in_progress',
+    ]);
   });
 });

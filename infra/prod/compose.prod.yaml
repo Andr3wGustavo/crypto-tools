@@ -136,12 +136,50 @@ services:
       MEXC_API_KEY: ${MEXC_API_KEY:-}
       MEXC_API_SECRET: ${MEXC_API_SECRET:-}
       WITHDRAW_ENABLED: "false"
+      # E9: the treasury is withdrawn only through the separate `withdrawer` service.
+      LIVE_WITHDRAW_MIN: ${WITHDRAW_MIN:-20}
+      LIVE_WITHDRAW_DAILY_CAP: ${WITHDRAW_DAILY_CAP:-100}
+      WITHDRAW_CHANNEL_SECRET: ${WITHDRAW_CHANNEL_SECRET:-}
+      WITHDRAW_ADDRESS: ${WITHDRAW_ADDRESS:-} # display only (dashboard on-chain card)
     volumes:
       - ${CORTEX_DATA:-/srv/cortex/data}:/data
     mem_limit: 256m
     logging:
       driver: json-file
       options: { max-size: 20m, max-file: "5" }
+
+  # E9: the ONLY process with a withdraw key (never the trading key). Sends treasury profit to the
+  # one whitelisted Solana wallet, within its own limits. Opt-in: `--profile withdraw`.
+  withdrawer:
+    image: ghcr.io/andr3wgustavo/cortex-worker:${IMAGE_TAG:?set IMAGE_TAG}
+    container_name: cortex-withdrawer
+    profiles: ["withdraw"]
+    restart: unless-stopped
+    command: ["node", "--enable-source-maps", "dist/withdraw.js"]
+    depends_on:
+      redis: { condition: service_healthy }
+    environment:
+      TRADING_MODE: live
+      WITHDRAW_ENABLED: "true"
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WITHDRAW_DATA_DIR: /data/withdraw
+      LIVE_SYMBOL: ${LIVE_SYMBOL:-}
+      MEXC_WITHDRAW_API_KEY: ${MEXC_WITHDRAW_API_KEY:-}
+      MEXC_WITHDRAW_API_SECRET: ${MEXC_WITHDRAW_API_SECRET:-}
+      WITHDRAW_KEY_ATTESTED: ${WITHDRAW_KEY_ATTESTED:-}
+      WITHDRAW_CHANNEL_SECRET: ${WITHDRAW_CHANNEL_SECRET:-}
+      WITHDRAW_COIN: ${WITHDRAW_COIN:-USDT}
+      WITHDRAW_NETWORK: ${WITHDRAW_NETWORK:-}
+      WITHDRAW_ADDRESS: ${WITHDRAW_ADDRESS:-}
+      WITHDRAW_MIN: ${WITHDRAW_MIN:-20}
+      WITHDRAW_DAILY_CAP: ${WITHDRAW_DAILY_CAP:-100}
+    volumes:
+      - ${CORTEX_DATA:-/srv/cortex/data}:/data
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }
 
 volumes:
   pgdata:

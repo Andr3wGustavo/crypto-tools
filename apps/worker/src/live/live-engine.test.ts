@@ -2,7 +2,10 @@ import crypto from 'node:crypto';
 import { BN } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
 import { describe, expect, it } from 'vitest';
+import { FakeWallet, ADDR, NET } from '../testing/fake-wallet';
 import { testConfig } from '../testing/synthetic-inputs';
+import { WithdrawReportMsgSchema, WithdrawRequestMsgSchema, decodeMessage, encodeMessage, type WithdrawReportMsg, type WithdrawRequestMsg } from '../withdraw/channel';
+import { DEFAULT_WITHDRAWER, MemoryJournal, Withdrawer } from '../withdraw/withdrawer';
 import { LiveEngine, type LiveEngineOptions, type LiveInputRecord, type LiveOutput, type WithdrawRequest } from './live-engine';
 
 const opts: LiveEngineOptions = { config: testConfig, capitalQuote: 15 };
@@ -596,5 +599,57 @@ describe('LiveEngine: withdrawals (E9)', () => {
     const outs = h.inputs.flatMap((r) => replay.process(r));
     expect(crypto.createHash('sha256').update(JSON.stringify(outs)).digest('hex')).toBe(h.outputHash());
     expect(replay.treasuryView()).toEqual(h.engine.treasuryView());
+  });
+});
+
+describe('E9 end to end: engine ⇄ signed channel ⇄ withdrawer ⇄ exchange', () => {
+  it('the treasury reaches the wallet once, with the books matching the exchange at every sync', async () => {
+    const secret = 'e2e-secret-0123456789abcdefghijklmnop';
+    const h = new Harness(new LiveEngine(wOpts));
+    const wallet = new FakeWallet(() => h.ts);
+    wallet.config[0]!.networkList![0] = { coin: 'USDT', netWork: NET, withdrawEnable: true, withdrawFee: '0.01', withdrawMin: '0', withdrawMax: '100' };
+    const withdrawer = new Withdrawer({ ...DEFAULT_WITHDRAWER, coin: 'USDT', network: NET, address: ADDR, minAmount: 0.03, dailyCap: 1 }, wallet, new MemoryJournal(), () => h.ts);
+    await withdrawer.verifySetup();
+    const wire: Array<Record<string, string>> = [];
+    h.onWithdrawRequest = (o) => {
+      const msg: WithdrawRequestMsg = { v: 1, botId: testConfig.botId, id: o.id, asset: o.asset, amount: o.amount, createdTs: o.createdTs, sentTs: o.ts, mode: o.mode };
+      wire.push(encodeMessage(msg, secret));
+    };
+    /** Delivers queued requests to the withdrawer and its signed reports back to the engine. */
+    const pump = async () => {
+      for (const fields of wire.splice(0)) {
+        const d = decodeMessage(fields, WithdrawRequestMsgSchema, secret);
+        if (!d.ok) throw new Error(d.reason);
+        const report = await withdrawer.handle(d.msg);
+        if (!report) continue;
+        const back = decodeMessage(encodeMessage({ v: 1, botId: d.msg.botId, ...report, sentTs: h.ts } satisfies WithdrawReportMsg, secret), WithdrawReportMsgSchema, secret);
+        if (!back.ok) throw new Error(back.reason);
+        const { v: _v, botId: _b, sentTs: _s, ...rep } = back.msg;
+        // The exchange debits the account when it accepts the withdrawal.
+        if (rep.status === 'SENT' && !h.inputs.some((r) => r.t === 'withdraw' && r.id === rep.id)) h.quote = h.quote.minus(d.msg.amount);
+        h.withdrawAnswer(rep);
+        h.market(250, 92, 92.1);
+      }
+    };
+
+    profitable(h);
+    h.market(2_000, 92, 92.1);
+    await pump();
+    expect(wallet.calls).toBe(1);
+    expect(wdStatus(h.outs)).toEqual(['PENDING', 'SENT']);
+    for (let i = 0; i < 3; i++) {
+      h.market(61_000, 92, 92.1);
+      await pump();
+    }
+    wallet.set(wallet.history[0]!.id, 7, '5xSolanaSig');
+    h.market(61_000, 92, 92.1);
+    await pump();
+    h.market(70_000, 92, 92.1);
+    expect(wdStatus(h.outs)).toEqual(['PENDING', 'SENT', 'CONFIRMED']);
+    expect(wallet.calls).toBe(1); // re-asked many times, sent once
+    expect(bal(h, 'external')).toBe('0.03');
+    expect(h.engine.treasuryView().withdrawals[0]).toMatchObject({ status: 'CONFIRMED', txId: '5xSolanaSig', fee: '0.01' });
+    expect(syncTrouble(h.outs)).toBe(false);
+    expect(status(h).status).toBe('running');
   });
 });

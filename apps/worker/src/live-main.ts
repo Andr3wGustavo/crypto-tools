@@ -18,6 +18,12 @@ import { NdjsonRecorder } from './recorder/ndjson';
 import { IoRedisLive, RedisSink } from './sinks/redis-sink';
 import { SnapshotStore, bootAny } from './state/boot';
 import { shadowStrategyConfig } from './strategy-config';
+import {
+  WITHDRAW_EVT_STREAM, WITHDRAW_REQ_STREAM, WITHDRAW_STREAM_MAX, WithdrawReportMsgSchema, decodeMessage, encodeMessage, validChannelSecret,
+  type WithdrawRequestMsg,
+} from './withdraw/channel';
+import { StreamTail, appendCapped } from './withdraw/stream-tail';
+import { WITHDRAW_DAILY_CAP_CEILING, WITHDRAW_MIN_FLOOR } from './withdraw/withdraw-gate';
 
 const env = z.object({
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
@@ -26,6 +32,11 @@ const env = z.object({
   LIVE_DATA_DIR: z.string().default('./data/live'),
   LIVE_PAPER_OFFSET_BPS: z.coerce.number().min(0).max(5_000).default(0),
   REDIS_URL: z.string().optional(),
+  /** Treasury withdrawals (E9): plan floor US$20, daily cap ≤ 1000. Part of the configuration. */
+  LIVE_WITHDRAW_MIN: z.coerce.number().min(WITHDRAW_MIN_FLOOR).default(WITHDRAW_MIN_FLOOR),
+  LIVE_WITHDRAW_DAILY_CAP: z.coerce.number().min(WITHDRAW_MIN_FLOOR).max(WITHDRAW_DAILY_CAP_CEILING).default(100),
+  /** Shared with the withdrawer only. Absent ⇒ no withdrawal channel (the treasury just accumulates). */
+  WITHDRAW_CHANNEL_SECRET: z.string().optional(),
 });
 
 /**
@@ -56,7 +67,11 @@ async function main(): Promise<void> {
   if (!info.tradable) throw new Error(`${info.symbol} is not tradable on MEXC`);
 
   const botId = `mexc:${info.symbol}:live`;
-  const engineOpts: LiveEngineOptions = { config: shadowStrategyConfig(botId, info, gate.capitalQuote), capitalQuote: gate.capitalQuote };
+  const engineOpts: LiveEngineOptions = {
+    config: shadowStrategyConfig(botId, info, gate.capitalQuote), capitalQuote: gate.capitalQuote,
+    // Always on: without a running withdrawer a request just waits, then is aborted as stale.
+    treasury: { withdraw: { minAmount: e.LIVE_WITHDRAW_MIN, dailyCap: Math.max(e.LIVE_WITHDRAW_MIN, e.LIVE_WITHDRAW_DAILY_CAP) } },
+  };
   const hash = liveConfigHash(engineOpts);
   const runId = `live-${hash.slice(0, 12)}`;
   const runParent = path.join(e.LIVE_DATA_DIR, `mexc-${info.symbol}`);
@@ -79,8 +94,30 @@ async function main(): Promise<void> {
   log.info({ from: boot.from, snapshot: boot.snapshot, replayed: boot.replayed, rejected: boot.rejected, fills: engine.fillCount, opened: engine.isOpened }, 'live engine booted');
   const recorder = new NdjsonRecorder(runParent, runId);
 
+  // ---- withdrawal channel (E9): signed requests out, signed reports in (see withdraw/channel.ts)
+  const channelSecret = e.WITHDRAW_CHANNEL_SECRET;
+  let wdWriter: Redis | undefined;
+  let wdReader: Redis | undefined;
+  if (e.REDIS_URL && validChannelSecret(channelSecret)) {
+    wdWriter = new Redis(e.REDIS_URL, { maxRetriesPerRequest: 3 });
+    wdReader = new Redis(e.REDIS_URL, { maxRetriesPerRequest: null });
+    for (const c of [wdWriter, wdReader]) c.on('error', () => undefined);
+  } else {
+    log.warn('no withdrawal channel (REDIS_URL + WITHDRAW_CHANNEL_SECRET): profit accumulates in the treasury, nothing is withdrawn');
+  }
+  const publishWithdraw = (outs: LiveOutput[]) => {
+    for (const o of outs) {
+      if (o.kind !== 'withdraw_request' || !wdWriter) continue;
+      const msg: WithdrawRequestMsg = { v: 1, botId, id: o.id, asset: o.asset, amount: o.amount, createdTs: o.createdTs, sentTs: Date.now(), mode: o.mode };
+      appendCapped(wdWriter, WITHDRAW_REQ_STREAM, WITHDRAW_STREAM_MAX, encodeMessage(msg, channelSecret!))
+        .catch((err: Error) => log.warn({ err: err.message, id: o.id }, 'withdraw request not published (the engine re-asks)'));
+    }
+  };
+
   // ---- sinks: dashboard view (Redis) + logs
-  const viewer = new BotViewBuilder({ botId, mode: 'live', symbol: info.symbol, base: info.base, quote: info.quote, run: runId, version, startedAt });
+  // The treasury wallet is shown on the dashboard only (this process never sends money).
+  const wallet = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(process.env.WITHDRAW_ADDRESS ?? '') ? process.env.WITHDRAW_ADDRESS! : null;
+  const viewer = new BotViewBuilder({ botId, mode: 'live', symbol: info.symbol, base: info.base, quote: info.quote, run: runId, version, startedAt, treasuryWallet: wallet });
   let redisConn: IoRedisLive | undefined;
   let redis: RedisSink | undefined;
   if (e.REDIS_URL) {
@@ -103,6 +140,8 @@ async function main(): Promise<void> {
       else if (o.kind === 'exec_warning') { noteError(); log.error({ msg: o.message }, 'live exec warning'); }
       else if (o.kind === 'sync' && !o.ok) log.warn({ sync: o }, 'live sync not ok');
       else if (o.kind === 'request') log.info({ request: o }, 'live request');
+      else if (o.kind === 'treasury') log.warn({ treasury: o }, 'profit moved to the treasury');
+      else if (o.kind === 'withdrawal') log.warn({ withdrawal: o.w }, `treasury withdrawal ${o.w.status}`);
       else if (o.kind === 'reconcile') log.error({ reconcile: o }, 'ledger/exchange divergence — halted');
       else if (o.kind === 'action' && (o.action.kind === 'status' || o.action.kind === 'error')) {
         if (o.action.kind === 'error') noteError();
@@ -123,6 +162,7 @@ async function main(): Promise<void> {
       viewer.observe(r, outs);
       redis?.push(toWireEvents(outs), r.ts, () => viewer.view(engine, { mexcAgeMs: mexc?.lastMessageAgeMs() ?? null, binanceAgeMs: binance?.lastMessageAgeMs() ?? null }), (v) => viewer.point(v));
       notable(outs);
+      publishWithdraw(outs);
     },
     onFatal: (err) => {
       log.fatal({ err }, 'live trading loop failed — fail-closed shutdown');
@@ -165,6 +205,30 @@ async function main(): Promise<void> {
     commands = new CommandSource({ botId, client: new IoRedisStreamClient(commandConn), log, onError: noteError, apply: (c) => handle({ t: 'command', ts: Date.now(), command: c.command }) });
     commands.start();
   }
+
+  // Withdrawer reports → recorded engine inputs.
+  let wdReading = !!wdReader;
+  const readReports = async () => {
+    const tail = new StreamTail(wdReader!, WITHDRAW_EVT_STREAM);
+    while (wdReading) {
+      try {
+        for (const entry of await tail.next(5_000)) {
+          const d = decodeMessage(entry.fields, WithdrawReportMsgSchema, channelSecret!);
+          if (!d.ok || d.msg.botId !== botId) {
+            if (!d.ok) { noteError(); log.error({ entry: entry.id, reason: d.reason }, 'withdraw report refused (not authenticated / invalid)'); }
+            continue;
+          }
+          const { v: _v, botId: _b, sentTs: _s, ...rep } = d.msg;
+          handle({ t: 'withdraw', ts: Date.now(), ...rep });
+        }
+      } catch (err) {
+        if (!wdReading) break;
+        log.warn({ err: (err as Error).message }, 'withdraw report stream read failed; retrying');
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+    }
+  };
+  if (wdReader) void readReports();
 
   let clockSkewMs = time.offsetMs;
   const clock = setInterval(() => handle({ t: 'clock', ts: Date.now() }), 1_000);
@@ -215,6 +279,9 @@ async function main(): Promise<void> {
     await user.stop();
     const stopCommands = commands?.stop();
     commandConn?.disconnect();
+    wdReading = false;
+    wdReader?.disconnect();
+    wdWriter?.disconnect();
     await stopCommands;
     await recorder.close();
     try { saveSnapshot(); } catch (err) { log.error({ err }, 'final snapshot failed (next boot replays from the previous one)'); }
