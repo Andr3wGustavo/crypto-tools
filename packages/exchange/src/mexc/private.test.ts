@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decodeMexcPush, encodeMexcPush, type MexcPush } from './codec';
-import { mexcPrivateChannels, mexcPrivateToExec, type MexcPrivatePush } from './private';
+import { mexcMyTradeToExec, mexcPrivateChannels, mexcPrivateToExec, mexcRestOrderToExec, type MexcPrivatePush } from './private';
 
 /** Round trip through the real protobuf schema: what the user stream will actually receive. */
 const wire = (p: MexcPrivatePush): MexcPrivatePush => decodeMexcPush(encodeMexcPush(p as unknown as MexcPush)) as unknown as MexcPrivatePush;
@@ -42,5 +42,18 @@ describe('MEXC private push → execution events', () => {
     expect(() => mexcPrivateToExec({ channel: 'x', privateOrders: { id: 'o', price: '1e-5' } }, T)).toThrow(/decimal/);
     expect(() => mexcPrivateToExec({ channel: 'x', privateOrders: {} }, T)).toThrow(/ids/);
     expect(mexcPrivateToExec({ channel: 'x' }, T)).toEqual([]);
+  });
+
+  it('REST replies map to the same events as the stream (exact decimals, unknown status never guessed)', () => {
+    const raw = { symbol: 'iousdt', orderId: '123', clientOrderId: 'c', price: '0.5123', origQty: '4.10', executedQty: '1.35', status: 'PARTIALLY_FILLED', side: 'SELL' as const };
+    expect(mexcRestOrderToExec(raw, T)).toEqual({
+      kind: 'order', ts: T, symbol: 'IOUSDT', clientOrderId: 'c', orderId: '123', side: 'SELL', status: 'PARTIALLY_FILLED', statusCode: null,
+      price: '0.5123', qty: '4.10', cumQty: '1.35', remainQty: '2.75', source: 'rest',
+    });
+    expect(mexcRestOrderToExec({ ...raw, status: 'WEIRD' }, T).status).toBe('UNKNOWN');
+    expect(() => mexcRestOrderToExec({ ...raw, executedQty: 'NaN' }, T)).toThrow(/decimal/);
+    expect(mexcMyTradeToExec({ symbol: 'IOUSDT', id: '77', orderId: '123', price: '0.5', qty: '2', commission: '0', commissionAsset: 'usdt', time: T, isBuyer: true, isMaker: true }, T)).toEqual({
+      kind: 'fill', ts: T, symbol: 'IOUSDT', clientOrderId: '', orderId: '123', tradeId: '77', side: 'BUY', price: '0.5', qty: '2', fee: '0', feeAsset: 'USDT', isMaker: true, selfTrade: false,
+    });
   });
 });
