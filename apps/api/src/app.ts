@@ -8,6 +8,7 @@ import websocket from '@fastify/websocket';
 import {
   BotEventSchema, BotIdSchema, EngineCommandSchema, RISKY_COMMANDS, WS_CLOSE_UNAUTHORIZED,
   type BotEventKind, type CommandEnvelope, type SystemInfo,
+  SOLANA_RPC_URL,
 } from '@cortex/shared';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -95,12 +96,15 @@ function decodeSignature(s: string): Uint8Array | undefined {
   return b64.length === 64 ? b64 : undefined;
 }
 
-/** Strict CSP for the dashboard: same-origin everything, no inline scripts, no framing. */
+/**
+ * Strict CSP for the dashboard: same-origin everything, no inline scripts, no framing. The one
+ * outside origin is the public Solana RPC (treasury wallet balance, read only).
+ */
 export function contentSecurityPolicy(origin: string): string {
   const ws = origin.replace(/^http/, 'ws');
   return [
     "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data:", "font-src 'self'",
-    `connect-src 'self' ${ws}`, "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'", "object-src 'none'",
+    `connect-src 'self' ${ws} ${new URL(SOLANA_RPC_URL).origin}`, "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'", "object-src 'none'",
   ].join('; ');
 }
 

@@ -200,6 +200,41 @@ O live fica **fechado** até que todos os itens abaixo valham. O processo recusa
 
 **Parar tudo:** `docker compose stop live`. O processo cancela todas as ordens antes de sair (até 30 s). Se ele morrer à força, o próximo boot cancela tudo antes de qualquer outra coisa.
 
+## 6d. Saque automático do tesouro (E9): só com o live rodando
+
+Metade do lucro confirmado vai para o tesouro, que nunca opera. O tesouro sai **só** para a sua
+carteira Solana, pelo serviço separado `withdrawer`, que tem a própria chave. Detalhes em
+`docs/E9-DESIGN.md`.
+
+1. **Carteira tesouro Solana.** Use uma carteira sua (Phantom serve) e copie o endereço **público**.
+2. **Whitelist na MEXC.** Em *Withdrawal address book*, adicione esse endereço para USDT na rede
+   Solana. Sem isso a MEXC recusa saques pela API (erro 10212).
+3. **Chave só de saque.** Crie uma **segunda** chave de API com estas restrições:
+   - permissão **apenas de saque** (sem trade);
+   - **vinculada ao IP do VPS**.
+
+   Confira na tela da chave e só então preencha
+   `WITHDRAW_KEY_ATTESTED=withdraw-only,ip-bound,address-whitelisted`.
+4. **No `cortex.env`:**
+   - `MEXC_WITHDRAW_API_KEY` e `MEXC_WITHDRAW_API_SECRET` (o serviço nunca recebe a chave de trade);
+   - `WITHDRAW_ADDRESS` (a carteira) e `WITHDRAW_NETWORK`, o nome exato da rede na MEXC. Se errar,
+     o withdrawer lista os nomes disponíveis e recusa;
+   - `WITHDRAW_CHANNEL_SECRET`, gerado com `openssl rand -hex 32`. O mesmo valor serve para o live e o withdrawer;
+   - `WITHDRAW_MIN=20` e `WITHDRAW_DAILY_CAP=100`, os limites do plano.
+5. **Subir:** `COMPOSE_PROFILES=live,withdraw`. O log deve mostrar `Cortex Farm WITHDRAWER armed`.
+   Se algo faltar, ele recusa e lista tudo.
+6. **Primeiro saque supervisionado.** Quando o tesouro passar de US$ 20 e todas as travas estiverem
+   verdes (página Tesouro), confira:
+   - o saque aparece na MEXC;
+   - aparece no card on-chain com o link do Solscan;
+   - a sincronização seguinte fica balanceada. Se ela divergir pela taxa, o bot para (fail-closed) e você me chama.
+
+**Saque "não resolvido"** (o log pede `withdraw resolve`): confira o histórico de saques na MEXC e rode
+`docker compose run --rm withdrawer node dist/withdraw.js resolve <id> confirmed <taxa>` ou `... failed`.
+Nunca resolva sem conferir: `failed` devolve a reserva ao tesouro.
+
+**Desligar saques:** `docker compose stop withdrawer`. O live continua operando e o tesouro só acumula.
+
 ## 7. Incidentes
 
 - **Alerta do dead-man**: `docker logs --tail 20 cortex-deadman` diz qual par e por quê (heartbeat velho, feed parado, `halted`). `halted` = a estratégia parou por risco ou divergência de ledger: **investigar antes** de `reset_halt`.

@@ -12,7 +12,11 @@ const KIND: Record<BotEvent['k'], { label: string; tone: Tone }> = {
   reconcile: { label: 'reconc.', tone: 'down' },
   markout: { label: 'markout', tone: 'neutral' },
   command: { label: 'comando', tone: 'brand' },
+  treasury: { label: 'tesouro', tone: 'brand' },
+  withdrawal: { label: 'saque', tone: 'info' },
 };
+
+const WD: Record<string, string> = { PENDING: 'reservado', SENT: 'enviado', CONFIRMED: 'confirmado', FAILED: 'falhou (reserva devolvida)' };
 
 const CMD: Record<string, string> = { pause: 'pausar', resume: 'retomar', reset_halt: 'resetar halt', reset_kill: 'resetar kill' };
 
@@ -42,6 +46,13 @@ export function describe(e: BotEvent): { text: string; tone: Tone } {
       const what = e.command ? CMD[e.command] ?? e.command : 'comando inválido';
       return e.applied ? { text: `${who}: ${what} (aplicado)`, tone: 'brand' } : { text: `${who}: ${what} recusado (${e.reason ?? '—'})`, tone: 'down' };
     }
+    case 'treasury':
+      return { text: `Lucro confirmado → tesouro: +${e.skim} (tesouro ${e.treasury})`, tone: 'up' };
+    case 'withdrawal':
+      return {
+        text: `Saque ${e.amount} ${WD[e.status] ?? e.status}${e.fee !== null ? ` · taxa ${e.fee}` : ''}${e.reason ? ` · ${e.reason}` : ''}`,
+        tone: e.status === 'CONFIRMED' ? 'up' : e.status === 'FAILED' ? 'down' : 'info',
+      };
   }
 }
 

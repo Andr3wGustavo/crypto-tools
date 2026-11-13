@@ -1,9 +1,21 @@
-import { SERIES_STEP_MS, type BotEvent, type BotView, type SeriesPoint } from '@cortex/shared';
+import { SERIES_STEP_MS, type BotEvent, type BotView, type SeriesPoint, type TreasuryView } from '@cortex/shared';
 import type { EngineOutput, InputRecord, ShadowEngine } from '../engine/shadow-engine';
-import type { LiveInputRecord, LiveOutput } from '../live/live-engine';
+import type { LiveEngine, LiveInputRecord, LiveOutput } from '../live/live-engine';
 
-/** What the view reads from an engine (shadow and live expose the same read side). */
-export type ViewableEngine = Pick<ShadowEngine, 'strategy' | 'edge' | 'recordCount' | 'fillCount'>;
+/** What the view reads from an engine (shadow and live expose the same read side; live adds the treasury). */
+export type ViewableEngine = Pick<ShadowEngine, 'strategy' | 'edge' | 'recordCount' | 'fillCount'> & Partial<Pick<LiveEngine, 'treasuryView'>>;
+
+/** Live treasury → wire view (exact decimals become display numbers; the last 20 withdrawals). */
+export function treasuryWire(t: ReturnType<LiveEngine['treasuryView']>, wallet: string | null): TreasuryView {
+  return {
+    asset: t.asset, cash: Number(t.cash), treasury: Number(t.treasury), withdrawing: Number(t.withdrawing), withdrawn: Number(t.withdrawn),
+    skimmed: Number(t.skimmed), principal: t.principal, wallet,
+    withdrawals: t.withdrawals.slice(-20).reverse().map((w) => ({
+      id: w.id, amount: Number(w.amount), status: w.status, createdTs: w.createdTs, updatedTs: w.updatedTs,
+      fee: w.fee !== undefined ? Number(w.fee) : null, txId: w.txId ?? null, reason: w.reason ?? null,
+    })),
+  };
+}
 
 /**
  * Maps the engine's internal state and outputs to the dashboard wire contracts in
@@ -19,6 +31,8 @@ export interface BotIdentity {
   run: string;
   version: string;
   startedAt: number;
+  /** Live: public address of the on-chain treasury wallet (display only). */
+  treasuryWallet?: string | null;
 }
 
 export interface FeedAges {
@@ -36,7 +50,12 @@ export function toWireEvent(o: EngineOutput | LiveOutput): BotEvent | undefined 
     return { k: 'fill', ts: e.ts, fillId: e.fillId, clientOrderId: e.clientOrderId, side: e.side, price: e.price, qty: e.qty, fee: e.fee, feeAsset: e.feeAsset };
   }
   if (o.kind === 'exec_warning') return { k: 'error', ts: o.ts, message: o.message };
-  if (o.kind === 'request' || o.kind === 'sync') return undefined; // I/O plumbing, logged by the live process
+  if (o.kind === 'request' || o.kind === 'sync' || o.kind === 'withdraw_request') return undefined; // I/O plumbing, logged by the live process
+  if (o.kind === 'treasury') return { k: 'treasury', ts: o.ts, skim: Number(o.skim), treasury: Number(o.treasury) };
+  if (o.kind === 'withdrawal') {
+    const w = o.w;
+    return { k: 'withdrawal', ts: o.ts, id: w.id, status: w.status, amount: Number(w.amount), fee: w.fee !== undefined ? Number(w.fee) : null, txId: w.txId ?? null, reason: w.reason ?? null };
+  }
   if (o.kind === 'sim') {
     const e = o.event;
     if (e.kind === 'fill') return { k: 'fill', ts: e.ts, fillId: e.fillId, clientOrderId: e.clientOrderId, side: e.side, price: e.price, qty: e.qty, fee: e.fee, feeAsset: e.feeAsset };
@@ -146,6 +165,7 @@ export class BotViewBuilder {
       counters: { records: engine.recordCount, fills: engine.fillCount },
       feeds: { mexcAgeMs: finite(feeds.mexcAgeMs), binanceAgeMs: finite(feeds.binanceAgeMs) },
       health: { ...this.health },
+      ...(engine.treasuryView ? { treasury: treasuryWire(engine.treasuryView(), this.id.treasuryWallet ?? null) } : {}),
     };
   }
 

@@ -18,6 +18,38 @@ const SideSchema = z.enum(['BUY', 'SELL']);
 const n = z.number();
 const nn = z.number().nullable();
 
+/** Public Solana RPC the dashboard reads the treasury wallet from (allowed by the CSP). */
+export const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
+/** USDT (SPL) mint on Solana. */
+export const USDT_SOLANA_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+
+export const WithdrawalStatusSchema = z.enum(['PENDING', 'SENT', 'CONFIRMED', 'FAILED']);
+export const WithdrawalViewSchema = z.object({
+  id: z.string(), amount: n, status: WithdrawalStatusSchema, createdTs: n, updatedTs: n, fee: nn, txId: z.string().nullable(), reason: z.string().nullable(),
+});
+export type WithdrawalView = z.infer<typeof WithdrawalViewSchema>;
+
+/** Live only (E9): cash / treasury / withdrawals, in the quote asset. */
+export const TreasuryViewSchema = z.object({
+  asset: z.string(),
+  /** Tradable balance (the strategy trades only this). */
+  cash: n,
+  /** Protected profit: never traded, never covers a loss. */
+  treasury: n,
+  /** Reserved for a withdrawal in flight. */
+  withdrawing: n,
+  /** Sent to the treasury wallet so far (net of fees). */
+  withdrawn: n,
+  /** Total profit ever moved to the treasury. */
+  skimmed: n,
+  /** Quote value deposited at opening. */
+  principal: nn,
+  /** Public address of the on-chain treasury wallet (display only), if configured. */
+  wallet: z.string().nullable(),
+  withdrawals: z.array(WithdrawalViewSchema),
+});
+export type TreasuryView = z.infer<typeof TreasuryViewSchema>;
+
 /** The latest state of one bot. Redis `bot:<id>:view`, refreshed at most once per second. */
 export const BotViewSchema = z.object({
   v: z.literal(1),
@@ -63,6 +95,7 @@ export const BotViewSchema = z.object({
   counters: z.object({ records: n, fills: n }),
   feeds: z.object({ mexcAgeMs: nn, binanceAgeMs: nn }),
   health: z.object({ errorsLastMin: n, eventLoopLagMs: n, clockSkewMs: n }),
+  treasury: TreasuryViewSchema.nullable().optional(),
 });
 export type BotView = z.infer<typeof BotViewSchema>;
 
@@ -92,6 +125,8 @@ export const BotEventSchema = z.discriminatedUnion('k', [
   z.object({ k: z.literal('reconcile'), ts: n, ok: z.boolean(), diffs: n }),
   z.object({ k: z.literal('markout'), ts: n, fillId: z.string(), horizonMs: n, bps: n }),
   z.object({ k: z.literal('command'), ts: n, id: z.string().nullable(), command: z.string().nullable(), actor: z.string().nullable(), applied: z.boolean(), reason: z.string().optional() }),
+  z.object({ k: z.literal('treasury'), ts: n, skim: n, treasury: n }),
+  z.object({ k: z.literal('withdrawal'), ts: n, id: z.string(), status: WithdrawalStatusSchema, amount: n, fee: nn, txId: z.string().nullable(), reason: z.string().nullable() }),
 ]);
 export type BotEvent = z.infer<typeof BotEventSchema>;
 export type BotEventKind = BotEvent['k'];

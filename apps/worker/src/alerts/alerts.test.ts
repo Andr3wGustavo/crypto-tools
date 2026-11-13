@@ -47,6 +47,17 @@ describe('alert rules (AFK)', () => {
     expect(titles(r.onEvent(BOT, status('running', 'venue_ok'), T + 600_000))).toEqual(['resolved:IOUSDT: live liberado']);
   });
 
+  it('withdrawals: confirmed is info (with the tx), failed is a warning, in-flight steps are silent', () => {
+    const r = new AlertRules();
+    const wd = (status: 'PENDING' | 'SENT' | 'CONFIRMED' | 'FAILED', extra = {}): BotEvent => ({ k: 'withdrawal', ts: T, id: 'wdab12cd-1', status, amount: 25, fee: null, txId: null, reason: null, ...extra });
+    expect(r.onEvent(BOT, wd('PENDING'), T)).toEqual([]);
+    expect(r.onEvent(BOT, wd('SENT'), T)).toEqual([]);
+    const ok1 = r.onEvent(BOT, wd('CONFIRMED', { fee: 1, txId: '5xSig' }), T);
+    expect(titles(ok1)).toEqual(['info:IOUSDT: saque confirmado']);
+    expect(ok1[0]!.text).toContain('5xSig');
+    expect(titles(r.onEvent(BOT, wd('FAILED', { reason: 'cooldown' }), T))).toEqual(['warn:IOUSDT: saque não feito']);
+  });
+
   it('an automatic pause alerts only if it lasts (no spam for a feed blip); manual pauses never', () => {
     const r = new AlertRules();
     const view = (over = {}) => [{ botId: BOT, view: ok(T, { status: 'paused', quoting: false, ...over }) }];

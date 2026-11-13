@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **81 / 100** (E8 live execution built and tested, gated closed until GO; its real-API rollout waits on the MEXC trade key + VPS; E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **84 / 100** (E9 treasury + auto-withdraw with the 5 locks built and tested end to end, switched on only by running the separate withdrawer; E8 live execution built and tested, gated closed until GO; its real-API rollout waits on the MEXC trade key + VPS; E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -183,6 +183,34 @@ Everything needed to trade for real is built and tested. Live stays **closed** u
 - ✅ LiveSession (boot cancel-all must be confirmed; sync; shutdown drains), live gate (every refusal tested), `dist/worker/live.js`, compose profile `live`.
 - ✅ Smoke: the real bundle against the real MEXC time endpoint refuses with all 8 reasons at once.
 - ⏳ Rollout step 1 (24 h paper on the real API with `LIVE_PAPER_OFFSET_BPS=500`): needs the MEXC trade key + VPS.
+
+## E9 — Treasury + auto-withdraw (built, gated) → target 93
+
+Design, locks and assumptions: [E9-DESIGN.md](E9-DESIGN.md).
+
+- ✅ Treasury in the live engine: half of the profit that is both realized and equity-confirmed is skimmed every minute. The strategy sees a `transfer`, not a loss (no fake drawdown); the treasury never gives back.
+- ✅ Withdrawal FSM PENDING → SENT → CONFIRMED/FAILED:
+  - the reserve is debited before the request and restored only on a definitive failure;
+  - an ambiguous outcome stays SENT (no double withdrawal);
+  - impossible reports are fatal;
+  - syncs accept the in-flight range.
+- ✅ The 5 locks + one in flight, enforced by the engine and again by the withdrawer against the **MEXC history**.
+- ✅ Withdrawer process (`dist/worker/withdraw.js`, compose profile `withdraw`):
+  - its own withdraw-only key (refuses the trade key);
+  - address-book check at start and before every submit;
+  - write-ahead fsync journal; MEXC `withdrawOrderId` = our id;
+  - human `resolve` command.
+- ✅ HMAC-signed Redis channel (forged / altered / malformed messages refused).
+- ✅ Dashboard: cash / treasury / in-flight / withdrawn, withdrawals with Solscan links, on-chain USDT balance (public Solana RPC, the only origin added to the CSP), the 5 locks live, Discord alerts.
+- ✅ Tests:
+  - core (transfer, skim, FSM, ledger);
+  - engine (9);
+  - withdrawer (14);
+  - gate and stream (3);
+  - view / alerts / web;
+  - **end to end** (engine ⇄ signed channel ⇄ withdrawer ⇄ fake MEXC: sent once despite many re-asks, confirmed, books equal to the exchange at every sync).
+- ✅ Shadow golden hash unchanged.
+- ⏳ Proof "withdrawal on the on-chain card": needs live + the withdraw key + a treasury of ≥ US$20. At D1 that takes a long time, honestly; this is the machinery for D2/D3.
 
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.

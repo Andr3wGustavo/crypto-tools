@@ -83,6 +83,31 @@ describe('dashboard view (engine → @cortex/shared contracts)', () => {
   });
 });
 
+describe('live treasury on the wire (E9)', () => {
+  it('treasury and withdrawal outputs become valid events; the view carries the buckets', () => {
+    const evs = toWireEvents([
+      { kind: 'treasury', ts: 1, skim: '0.04', treasury: '0.04', withdrawing: '0', skimmed: '0.04', withdrawn: '0' },
+      { kind: 'withdrawal', ts: 2, w: { id: 'wdab12cd-1', asset: 'USDT', amount: '25', status: 'CONFIRMED', createdTs: 1, updatedTs: 2, fee: '1', txId: '5xSig' } },
+      { kind: 'withdraw_request', ts: 3, id: 'wdab12cd-1', asset: 'USDT', amount: '25', createdTs: 1, mode: 'status' },
+    ]);
+    expect(evs).toEqual([
+      { k: 'treasury', ts: 1, skim: 0.04, treasury: 0.04 },
+      { k: 'withdrawal', ts: 2, id: 'wdab12cd-1', status: 'CONFIRMED', amount: 25, fee: 1, txId: '5xSig', reason: null },
+    ]);
+    for (const e of evs) expect(BotEventSchema.safeParse(e).success).toBe(true);
+    const engine = new ShadowEngine(testEngineOptions);
+    for (const r of syntheticInputs(2)) engine.process(r);
+    const b = new BotViewBuilder({ botId: 'mexc:SOLUSDT:live', mode: 'live', symbol: 'SOLUSDT', base: 'SOL', quote: 'USDT', run: 'live-x', version: 't', startedAt: 0, treasuryWallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU' });
+    const treasuryView = () => ({
+      asset: 'USDT', cash: '15.04', treasury: '0.04', withdrawing: '0', withdrawn: '0', skimmed: '0.04', principal: 15,
+      withdrawals: [{ id: 'wdab12cd-1', asset: 'USDT', amount: '25', status: 'FAILED' as const, createdTs: 1, updatedTs: 2, reason: 'stale request' }],
+    });
+    const v = b.view(Object.assign(engine, { treasuryView }), { mexcAgeMs: 1, binanceAgeMs: 1 });
+    expect(BotViewSchema.parse(v).treasury).toMatchObject({ cash: 15.04, treasury: 0.04, wallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', withdrawals: [{ status: 'FAILED', fee: null, txId: null, reason: 'stale request' }] });
+    expect(new BotViewBuilder({ botId: 'mexc:SOLUSDT:shadow', mode: 'shadow', symbol: 'SOLUSDT', base: 'SOL', quote: 'USDT', run: 'r', version: 't', startedAt: 0 }).view(new ShadowEngine(testEngineOptions), { mexcAgeMs: 1, binanceAgeMs: 1 }).treasury).toBeUndefined();
+  });
+});
+
 describe('Redis live publisher', () => {
   const fill: BotEvent = { k: 'fill', ts: 1, fillId: 'f1', clientOrderId: 'c1', side: 'BUY', price: 100, qty: 1, fee: 0, feeAsset: 'quote' };
   const order: BotEvent = { k: 'order', ts: 2, op: 'cancel', clientOrderId: 'c2', reason: 'ttl' };

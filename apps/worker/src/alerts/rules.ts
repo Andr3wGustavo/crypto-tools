@@ -117,6 +117,10 @@ export class AlertRules {
         return e.applied
           ? [{ severity: 'info', botId, ts: now, title: `${s}: comando ${CMD[e.command ?? ''] ?? e.command}`, text: `Aplicado. Quem: ${e.actor ?? '?'}.` }]
           : [{ severity: 'warn', botId, ts: now, title: `${s}: comando recusado`, text: `${CMD[e.command ?? ''] ?? e.command ?? 'inválido'} recusado pelo worker (${e.reason ?? '—'}). Quem: ${e.actor ?? '?'}.` }];
+      case 'withdrawal':
+        if (e.status === 'CONFIRMED') return [{ severity: 'info', botId, ts: now, title: `${s}: saque confirmado`, text: `${e.amount} enviados à carteira tesouro (taxa ${e.fee ?? '?'}).${e.txId ? ` Tx: ${e.txId}` : ''}` }];
+        if (e.status === 'FAILED') return [{ severity: 'warn', botId, ts: now, title: `${s}: saque não feito`, text: `Saque de ${e.amount} falhou e a reserva voltou ao tesouro: ${e.reason ?? '—'}. Nova tentativa só depois do intervalo de 24 h.` }];
+        return [];
       default:
         return [];
     }

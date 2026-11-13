@@ -7,7 +7,28 @@ import { aprOf, bandOf, botHealth, pnlOf, totalsOf, touchSpreadBps } from './der
 import { fmtAge, fmtBps, fmtPrice, fmtUsd, pairLabel, shortAddr, toCsv } from './format';
 import { LiveStore, MAX_EVENTS, WS_CLOSE_UNAUTHORIZED, backoffMs, mergePoints, wsUrl, type SocketLike } from './live';
 import { hrefOf, parseRoute } from './router';
+import { parseTokenBalance, solscanTx, usdtBalance } from './solana';
 import { findPhantom, signInError, signInWithPhantom, toBase64, type SolanaProvider } from './wallet';
+
+describe('solana treasury wallet (read only)', () => {
+  it('sums parsed token accounts; anything malformed is null; links are encoded', async () => {
+    const acct = (ui: string) => ({ account: { data: { parsed: { info: { tokenAmount: { uiAmountString: ui } } } } } });
+    expect(parseTokenBalance({ result: { value: [acct('20.5'), acct('4.5')] } })).toBe(25);
+    expect(parseTokenBalance({ result: { value: [] } })).toBe(0);
+    expect(parseTokenBalance({ error: { code: -32602 } })).toBeNull();
+    expect(parseTokenBalance({ result: { value: [{ account: {} }] } })).toBeNull();
+    expect(solscanTx('a/b')).toBe('https://solscan.io/tx/a%2Fb');
+    const calls: string[] = [];
+    const f = (async (url: string, init: { body: string }) => {
+      calls.push(url, init.body);
+      return new Response(JSON.stringify({ result: { value: [acct('7')] } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    expect(await usdtBalance('Owner1', f)).toBe(7);
+    expect(calls[0]).toBe(shared.SOLANA_RPC_URL);
+    expect(JSON.parse(calls[1]!)).toMatchObject({ method: 'getTokenAccountsByOwner', params: ['Owner1', { mint: shared.USDT_SOLANA_MINT }, { encoding: 'jsonParsed' }] });
+    expect(await usdtBalance('Owner1', (async () => { throw new Error('offline'); }) as unknown as typeof fetch)).toBeNull();
+  });
+});
 
 const BOT = 'mexc:IOUSDT:shadow';
 const T = Date.UTC(2026, 10, 12, 12);

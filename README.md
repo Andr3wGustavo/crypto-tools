@@ -108,16 +108,19 @@ pm2 start ecosystem.config.js
 | `MM_DAILY_STOP_LOSS` | Stop-loss diário | `-0.015` (-1.5%) |
 | `MM_DRIFT_THRESHOLD` | Cancela ordens se mid mover mais que | `0.002` (0.2%) |
 
-### Compound & Auto-Withdraw
+### Tesouro & saque automático (E9)
+
+O lucro confirmado (realizado **e** confirmado pelo equity real) é dividido: 50% fica no caixa e
+compõe, 50% vai para o tesouro, que nunca opera. O tesouro sai para **uma** carteira Solana na
+whitelist da MEXC, só pelo processo separado `withdrawer`, com 5 travas. Ver `.env.example`
+(bloco E9) e `docs/runbooks/vps.md` §6d.
 
 | Variável | Descrição | Default |
 |---|---|---|
-| `MM_CAPITAL_BASE` | Capital base inicial | `100.0` |
-| `MM_REINVESTMENT_RATIO` | % dos lucros reinvestidos | `0.5` (50%) |
-| `MM_DRAWDOWN_LIMIT` | Halt se drawdown exceder | `0.15` (15%) |
-| `WITHDRAW_THRESHOLD` | Reserva protegida ≥ este valor → skim | `0.5` |
-| `WITHDRAW_DESTINATION` | Carteira destino (Solana pubkey ou endereço Binance) | (vazio = desabilitado) |
-| `WITHDRAW_ASSET` | Asset a retirar | `USDT` |
+| `WITHDRAW_ADDRESS` | Carteira tesouro Solana (precisa estar na whitelist da MEXC) | (vazio = sem saque) |
+| `WITHDRAW_NETWORK` | Nome exato da rede na MEXC (USDT em Solana) | — |
+| `WITHDRAW_MIN` / `WITHDRAW_DAILY_CAP` | Mínimo (≥ 20) e teto diário (≤ 1000) | `20` / `100` |
+| `WITHDRAW_CHANNEL_SECRET` | Segredo HMAC entre live e withdrawer (≥ 32 chars) | — |
 
 ### Solana DEX (opcional)
 
