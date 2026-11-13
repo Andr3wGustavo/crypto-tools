@@ -64,6 +64,8 @@ export class AlertRules {
   private readonly lastStatus = new Map<string, string>();
   /** Automatic pauses in progress: since when, and why. */
   private readonly autoPause = new Map<string, { since: number; reason: string }>();
+  /** Live venue holds in progress (user stream down, re-syncing, rate limit, fatal…). */
+  private readonly venueHold = new Map<string, { since: number; reason: string }>();
 
   constructor(private readonly cfg: AlertRulesConfig = DEFAULT_ALERT_RULES) {}
 
@@ -72,6 +74,21 @@ export class AlertRules {
     const s = sym(botId);
     switch (e.k) {
       case 'status': {
+        // Live venue holds: the status stays the same, only quoting stops.
+        if (e.reason.startsWith('venue_hold:')) {
+          const why = e.reason.slice('venue_hold:'.length);
+          const was = this.venueHold.get(botId);
+          this.venueHold.set(botId, { since: was?.since ?? now, reason: why });
+          if (why.startsWith('fatal:') && !was?.reason.startsWith('fatal:')) {
+            return [{ severity: 'critical', botId, ts: now, title: `${s}: live travado (${why.slice(6)})`, text: `A corretora ou a conta estão num estado que exige você: ${why.slice(6)}. Ordens canceladas, nada é cotado. Corrija e resete o halt (pede 2FA).` }];
+          }
+          return [];
+        }
+        if (e.reason === 'venue_ok') {
+          const was = this.venueHold.get(botId);
+          this.venueHold.delete(botId);
+          return was?.reason.startsWith('fatal:') ? [{ severity: 'resolved', botId, ts: now, title: `${s}: live liberado`, text: `O bloqueio (${was.reason.slice(6)}) foi resolvido; o bot volta a cotar.` }] : [];
+        }
         const prev = this.lastStatus.get(botId);
         this.lastStatus.set(botId, e.status);
         if (e.status === 'paused' && !e.reason.startsWith('manual')) {
@@ -124,6 +141,12 @@ export class AlertRules {
         severity: 'warn', botId, ts: now, title: `${s}: pausado automaticamente`,
         text: `Motivo: ${ap?.reason ?? '?'} (há ${ap ? Math.round((now - ap.since) / 1000) : 0} s). O bot volta sozinho quando a condição passar.`,
       }, { severity: 'resolved', botId, ts: now, title: `${s}: voltou a cotar`, text: 'A pausa automática terminou.' }));
+
+      const vh = this.venueHold.get(botId);
+      out.push(...this.condition(`venue:${botId}`, vh !== undefined && !vh.reason.startsWith('fatal:') && now - vh.since >= this.cfg.autoPauseMs, now, {
+        severity: 'warn', botId, ts: now, title: `${s}: live sem cotar`,
+        text: `Motivo: ${vh?.reason ?? '?'} (há ${vh ? Math.round((now - vh.since) / 1000) : 0} s). Ordens canceladas; volta sozinho após reconciliar com a corretora.`,
+      }, { severity: 'resolved', botId, ts: now, title: `${s}: live voltou a cotar`, text: 'Corretora reconciliada; cotando de novo.' }));
 
       const feedAge = view.feeds.mexcAgeMs;
       const feedDead = feedAge === null || feedAge > this.cfg.staleFeedMs;

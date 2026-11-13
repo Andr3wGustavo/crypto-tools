@@ -26,6 +26,27 @@ describe('alert rules (AFK)', () => {
     expect(r.onEvent(BOT, { k: 'reconcile', ts: T, ok: true, diffs: 0 }, T + 5)).toEqual([]);
   });
 
+  it('live venue holds: fatal is critical at once; a transient hold alerts only if it lasts', () => {
+    const r = new AlertRules();
+    const view = (ts: number) => [{ botId: BOT, view: ok(ts, { quoting: false }) }];
+    r.onEvent(BOT, status('running', 'start'), T);
+    expect(r.onEvent(BOT, status('running', 'venue_hold:stream_down'), T)).toEqual([]);
+    expect(titles(r.onViews(view(T + 30_000), T + 30_000)).filter((x) => x.includes('live'))).toEqual([]);
+    r.onEvent(BOT, status('running', 'venue_hold:syncing'), T + 40_000); // still the same hold episode
+    expect(titles(r.onViews(view(T + 61_000), T + 61_000))).toEqual(['warn:IOUSDT: live sem cotar']);
+    expect(r.onEvent(BOT, status('running', 'venue_ok'), T + 70_000)).toEqual([]);
+    expect(titles(r.onViews([{ botId: BOT, view: ok(T + 71_000) }], T + 71_000))).toEqual(['resolved:IOUSDT: live voltou a cotar']);
+    // A short blip never alerts.
+    r.onEvent(BOT, status('running', 'venue_hold:rate_limited'), T + 80_000);
+    r.onEvent(BOT, status('running', 'venue_ok'), T + 90_000);
+    expect(r.onViews([{ botId: BOT, view: ok(T + 200_000) }], T + 200_000)).toEqual([]);
+    // Fatal: critical immediately, once; resolved when a human clears it.
+    expect(titles(r.onEvent(BOT, status('running', 'venue_hold:fatal:auth'), T + 300_000))).toEqual(['critical:IOUSDT: live travado (auth)']);
+    expect(r.onEvent(BOT, status('running', 'venue_hold:fatal:auth'), T + 301_000)).toEqual([]);
+    expect(titles(r.onViews(view(T + 500_000), T + 500_000)).filter((x) => x.includes('live'))).toEqual([]);
+    expect(titles(r.onEvent(BOT, status('running', 'venue_ok'), T + 600_000))).toEqual(['resolved:IOUSDT: live liberado']);
+  });
+
   it('an automatic pause alerts only if it lasts (no spam for a feed blip); manual pauses never', () => {
     const r = new AlertRules();
     const view = (over = {}) => [{ botId: BOT, view: ok(T, { status: 'paused', quoting: false, ...over }) }];
