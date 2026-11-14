@@ -52,6 +52,17 @@ describe('SimExecutor (conservative shadow fills)', () => {
     expect(fills).toMatchObject([{ kind: 'fill', clientOrderId: 'd', qty: 1 }]);
   });
 
+  it('partial fills are decimal: no binary-float residue reaches the ledger', () => {
+    const s = new SimExecutor({ latencyMs: 0, makerFeeRate: 0 });
+    s.onBook(0, book);
+    s.place(0, { clientOrderId: 'p', side: 'BUY', price: 100, qty: 0.02 });
+    const f1 = s.onTrade({ ts: 1, price: 100, qty: 0.0079, aggressor: 'sell' });
+    const f2 = s.onTrade({ ts: 2, price: 100, qty: 1, aggressor: 'sell' });
+    expect(f1).toMatchObject([{ qty: 0.0079 }]);
+    expect(f2).toMatchObject([{ qty: 0.0121 }]); // raw float: 0.012100000000000001
+    expect(s.onTrade({ ts: 3, price: 100, qty: 1, aggressor: 'sell' })).toEqual([]); // fully filled, removed
+  });
+
   it('activates after latency and rejects orders that would cross', () => {
     const s = new SimExecutor({ latencyMs: 100, makerFeeRate: 0 });
     s.onBook(0, book);

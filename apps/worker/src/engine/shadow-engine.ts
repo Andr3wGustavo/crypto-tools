@@ -41,8 +41,11 @@ export interface ShadowEngineOptions {
  *    at boot (genesis replay), recordings stay valid.
  * v2 state (E8): the strategy gained `venueHold` (live only, always null in shadow). Shadow
  * outputs are unchanged: the E3 recording still replays to output hash febef904….
+ * v2 behavior (2026-11-13, AFK review): bid sized to the room under the inventory cap, dust
+ * inventory unstuck with one minimum order, sells never leave unsellable dust, sim fills snapped
+ * to decimals. Fixes a deadlock where the bot stopped quoting forever (see liveness.test.ts).
  */
-export const ENGINE_BEHAVIOR_VERSION = 1;
+export const ENGINE_BEHAVIOR_VERSION = 2;
 export const ENGINE_STATE_VERSION = 2;
 
 /** Everything needed to resume the engine exactly where it stopped. */

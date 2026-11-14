@@ -1,5 +1,5 @@
 import type { AsQuote } from './avellaneda';
-import { BN, addSteps, ceilToStep, floorToStep } from './tick';
+import { BN, addSteps, ceilToStep, decimalsOf, floorToStep } from './tick';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -25,6 +25,11 @@ export interface FreeBalances {
 
 export interface BuildParams {
   orderNotional: number;
+  /**
+   * Target value of the bid when it differs from `orderNotional` (the room left under the
+   * inventory cap, or the minimum order that makes stuck dust sellable). Defaults to orderNotional.
+   */
+  bidNotional?: number;
   costBps: number;
   /** Minimum edge (bps vs fair) on the inventory-reducing side; decays with inventory age. */
   reduceMinEdgeBps: number;
@@ -101,7 +106,16 @@ export function buildQuoteOrders(
     }
     const p = Number(price);
     const edge = edgeBid(p, fair);
-    const qty = p > 0 ? floorToStep(new BN(params.orderNotional).div(price), rules.stepSize) : '0';
+    const target = params.bidNotional ?? params.orderNotional;
+    let qty = p > 0 ? floorToStep(new BN(target).div(price), rules.stepSize) : '0';
+    // Flooring to the step can drop a valid-sized target under the exchange minimum (a coarse step,
+    // e.g. 0.01 SOL ≈ US$0.9 against a US$1 minimum). Round up to the smallest valid size instead,
+    // but never by more than one step above the target.
+    if (p > 0 && (new BN(qty).lt(rules.minQty) || Number(qty) * p < rules.minNotional)) {
+      const minValid = BN.max(new BN(ceilToStep(new BN(rules.minNotional).div(price), rules.stepSize)), new BN(rules.minQty));
+      const v = minValid.times(price);
+      if (v.gte(rules.minNotional) && v.lte(new BN(target).plus(new BN(rules.stepSize).times(price)))) qty = minValid.toFixed(decimalsOf(rules.stepSize));
+    }
     const value = Number(qty) * p;
     if (edge < params.costBps) res.skipped.push({ side: 'BUY', reason: 'insufficient_edge' });
     else if (new BN(qty).lt(rules.minQty) || value < rules.minNotional) res.skipped.push({ side: 'BUY', reason: 'below_min' });
@@ -122,7 +136,13 @@ export function buildQuoteOrders(
     const edge = edgeAsk(p, fair);
     const wanted = new BN(params.orderNotional).div(price);
     const held = new BN(bal.baseFree);
-    const qty = floorToStep(BN.min(wanted, held), rules.stepSize);
+    let qty = floorToStep(BN.min(wanted, held), rules.stepSize);
+    // Never leave unsellable dust behind: if what would remain after this sell is below the
+    // exchange minimum, sell everything we hold in this order instead.
+    const all = floorToStep(held, rules.stepSize);
+    if (new BN(qty).lt(all) && held.minus(qty).times(p).lt(rules.minNotional)) qty = all;
+    // floorToStep snaps values within 1e-9 step of a multiple; never round *up* past what we hold.
+    while (new BN(qty).gt(held) && new BN(qty).gt(0)) qty = addSteps(qty, rules.stepSize, -1);
     const value = Number(qty) * p;
     if (held.times(p).lt(rules.minNotional) || new BN(qty).lt(rules.minQty) || value < rules.minNotional) {
       res.skipped.push({ side: 'SELL', reason: held.gt(0) && held.times(p).gte(rules.minNotional) ? 'below_min' : 'no_inventory' });

@@ -71,7 +71,11 @@ describe('pre-registered evaluation (protocol.json → replay → GO/NO-GO)', ()
     await writeRun(data, 'SOLUSDT');
     const late = makeEdgeProtocol(pairsFile(['SOLUSDT']), new Date(T0 + 15 * 60_000), { fingerprint: FP, commit: COMMIT }, rule);
     const r = (await evaluateProtocol(late, data, { fingerprint: FP })).results[0]!;
-    expect(r.decision).toBe('PENDING'); // 25 min after the registration: look 0 (20 min) done, look 1 (35 min) not yet
+    // 25 min of data after the registration: only look 0 (20 min) can have been judged; look 1
+    // (35 min) cannot. Look 0 may already say GO (strong synthetic edge) or keep waiting.
+    if (r.decision === 'PENDING') expect(r.nextLook).toBe(1);
+    else expect(r).toMatchObject({ decision: 'GO', decidedAtLook: 0 });
+    expect(r.looks).toHaveLength(1);
     expect(r.startTs).toBeGreaterThanOrEqual(T0 + 15 * 60_000);
   });
 

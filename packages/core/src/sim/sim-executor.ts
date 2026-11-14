@@ -95,9 +95,12 @@ export class SimExecutor {
         available -= consumed;
         if (o.queueAhead <= 0) fillQty = Math.min(o.remaining, available);
       }
+      // Quantities are decimal on the exchange. Snap away binary-float residue (0.02 − 0.0079 =
+      // 0.012100000000000001) so the exact ledger never sees a quantity the venue could not print.
+      fillQty = snapQty(fillQty);
       if (fillQty > 0) {
         available -= fillQty;
-        o.remaining -= fillQty;
+        o.remaining = snapQty(o.remaining - fillQty);
         o.fills++;
         const notional = fillQty * o.price;
         out.push({
@@ -156,3 +159,6 @@ function queueAhead(o: SimOrder, b: BookTop | undefined): number {
   if (o.price === b.ask) return b.askQty;
   return Number.POSITIVE_INFINITY;
 }
+
+/** Round to 12 decimals (far below any exchange step) to remove binary-float residue. */
+export const snapQty = (x: number): number => Number(x.toFixed(12));

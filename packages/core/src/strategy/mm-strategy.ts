@@ -1,6 +1,7 @@
 import { AverageCostPosition } from '../accounting/position';
 import { DEFAULT_AS_PARAMS, computeAsQuote } from '../quoting/avellaneda';
 import { QuoteSanityError, buildQuoteOrders, type BookTop, type OrderTarget, type Side } from '../quoting/quote-builder';
+import { floorToStep } from '../quoting/tick';
 import { DEFAULT_RISK_LIMITS, evaluateRisk, type RiskAction, type RiskViolation } from '../risk/risk-manager';
 import { DEFAULT_LEAD_LAG, LeadLagModel } from '../signals/lead-lag';
 import { DEFAULT_MARKOUTS, MarkoutTracker } from '../signals/markouts';
@@ -344,15 +345,32 @@ export class MarketMakerStrategy {
     const w = Math.min(1, Math.max(0, (age - d.startMs) / Math.max(1, d.fullMs - d.startMs)));
     const reduceMinEdgeBps = costBps + w * (d.minEdgeBpsAtFull - costBps);
 
+    // Bid size: the room left under the inventory cap, so the cap is hard and a partial fill never
+    // blocks the bid entirely. Dead zone (AFK deadlock, found in the 2026-11-13 review): inventory
+    // too small to sell (under the exchange minimum after step rounding) AND too close to the cap to
+    // buy a full order — the bot would never quote again. Then one minimum order is allowed so the
+    // position becomes sellable; the cap is exceeded by at most one minimum order (+ one step).
+    const minOrderValue = this.cfg.rules.minNotional * this.cfg.minOrderMultiple;
+    const baseFree = Math.max(0, this.baseTotal - baseLocked);
+    const sellable = Number(floorToStep(baseFree, this.cfg.rules.stepSize)) * fair >= this.cfg.rules.minNotional;
+    const dust = this.baseTotal > EPS && !sellable;
+    let bidNotional = Math.min(orderNotional, maxInv - invNotional);
+    let capBlocksBid = bidNotional < minOrderValue - EPS;
+    if (capBlocksBid && dust) {
+      bidNotional = minOrderValue;
+      capBlocksBid = false;
+    }
+
     let build;
     try {
       build = buildQuoteOrders(
         asq,
         book,
         this.cfg.rules,
-        { quoteFree: Math.max(0, this.quoteTotal - quoteLocked), baseFree: Math.max(0, this.baseTotal - baseLocked) },
+        { quoteFree: Math.max(0, this.quoteTotal - quoteLocked), baseFree },
         {
           orderNotional,
+          bidNotional,
           costBps,
           reduceMinEdgeBps,
           pennyMinSpreadTicks: this.cfg.pennyMinSpreadTicks,
@@ -362,7 +380,7 @@ export class MarketMakerStrategy {
         {
           pullBid: tox.toxic && tox.direction === 'down',
           pullAsk: tox.toxic && tox.direction === 'up',
-          noBid: this.reduceOnly || invNotional + orderNotional > maxInv + EPS,
+          noBid: this.reduceOnly || capBlocksBid,
         },
       );
     } catch (err) {

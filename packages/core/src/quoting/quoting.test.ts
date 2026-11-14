@@ -124,6 +124,32 @@ describe('buildQuoteOrders', () => {
     expect(() => buildQuoteOrders(bad, { bid: 49, bidQty: 1, ask: 151, askQty: 1 }, rules, { quoteFree: 15, baseFree: 1 }, params)).toThrow(QuoteSanityError);
   });
 
+  // AFK deadlock review (2026-11-13): coarse steps (0.01 SOL ≈ US$0.88 < US$1 minimum).
+  describe('coarse step vs exchange minimum', () => {
+    const sol: SymbolRules = { tickSize: '0.01', stepSize: '0.01', minQty: '0.01', minNotional: 1 };
+    const solBook = { bid: 87.9, bidQty: 5, ask: 88.1, askQty: 5 };
+    const solQuote = computeAsQuote({ ...DEFAULT_AS_PARAMS, minHalfSpreadBps: 5, maxHalfSpreadBps: 5 }, { fair: 88, sigmaBps: 0, q: 0, costBps: 0 });
+
+    it('rounds a bid up to the smallest valid size, by at most one step', () => {
+      const r = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0 }, { ...params, bidNotional: 1.1 });
+      expect(r.bid?.qty).toBe('0.02'); // floor(1.1/88) = 0.01 → US$0.88 < US$1 → 0.02
+      const tiny = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0 }, { ...params, bidNotional: 0.05 });
+      expect(tiny.bid).toBeUndefined(); // more than one step away: refused, not inflated
+      expect(tiny.skipped).toContainEqual({ side: 'BUY', reason: 'below_min' });
+    });
+
+    it('sells everything instead of leaving unsellable dust', () => {
+      const r = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0.03 }, params);
+      expect(r.ask?.qty).toBe('0.03'); // 0.02 would leave 0.01 ≈ US$0.88, which could never be sold
+    });
+
+    it('never sells more than it holds, even when step snapping would round up', () => {
+      const r = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0.029999999999 }, { ...params, orderNotional: 5 });
+      expect(Number(r.ask?.qty)).toBeLessThanOrEqual(0.029999999999);
+      expect(r.ask?.qty).toBe('0.02');
+    });
+  });
+
   it('property: outputs are always exchange-valid and never take liquidity', () => {
     fc.assert(
       fc.property(

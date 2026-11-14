@@ -19,10 +19,10 @@ const meta = { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 }
 
 describe('ShadowEngine', () => {
   it('golden: shadow decisions are frozen (any change here is a new experiment, not a refactor)', () => {
-    // Pinned before the E8 live work; also holds on the real E3 recording (output hash febef904…).
+    // Re-pinned 2026-11-13 for behavior v2 (AFK dead-zone fix; v1 froze after ~3 min: 78 fills).
     const { hash, engine } = runHash(inputs(60));
-    expect(engine.fillCount).toBe(78);
-    expect(hash).toBe('90fbc0c28c831d33678fb93421ed92d9611ea640b179d3a186e448b2ffe7c8b8');
+    expect(engine.fillCount).toBe(838);
+    expect(hash).toBe('d13a1ffcbc8852ec64f8cd611778fee8aed6f06d679bacd8a65858c37406c965');
   });
 
   it('replay is bit-exact, including through the gzip NDJSON recorder', async () => {
