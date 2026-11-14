@@ -6,7 +6,7 @@ import { DEFAULT_RISK_LIMITS, evaluateRisk, type RiskAction, type RiskViolation 
 import { DEFAULT_LEAD_LAG, LeadLagModel } from '../signals/lead-lag';
 import { DEFAULT_MARKOUTS, MarkoutTracker } from '../signals/markouts';
 import { DEFAULT_VOL_PARAMS, VolEstimator } from '../stats/vol';
-import { botTag, makeClientOrderId, nextStatus, type OrderStatus } from '../orders/fsm';
+import { makeClientOrderId, strategyTag, nextStatus, type OrderStatus } from '../orders/fsm';
 import type { BookEvent, BotStatus, StrategyAction, StrategyConfig, StrategyEvent } from './types';
 
 interface WorkingOrder {
@@ -93,7 +93,7 @@ export class MarketMakerStrategy {
     readonly cfg: StrategyConfig,
     initial: { quote: number; base: number },
   ) {
-    this.tag = botTag(cfg.botId);
+    this.tag = strategyTag(cfg);
     this.quoteTotal = initial.quote;
     this.baseTotal = initial.base;
     this.vol = new VolEstimator(cfg.vol);

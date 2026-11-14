@@ -50,7 +50,7 @@ export function toWireEvent(o: EngineOutput | LiveOutput): BotEvent | undefined 
     return { k: 'fill', ts: e.ts, fillId: e.fillId, clientOrderId: e.clientOrderId, side: e.side, price: e.price, qty: e.qty, fee: e.fee, feeAsset: e.feeAsset };
   }
   if (o.kind === 'exec_warning') return { k: 'error', ts: o.ts, message: o.message };
-  if (o.kind === 'request' || o.kind === 'sync' || o.kind === 'withdraw_request') return undefined; // I/O plumbing, logged by the live process
+  if (o.kind === 'request' || o.kind === 'sync' || o.kind === 'withdraw_request' || o.kind === 'order_status') return undefined; // I/O plumbing, logged by the live process
   if (o.kind === 'treasury') return { k: 'treasury', ts: o.ts, skim: Number(o.skim), treasury: Number(o.treasury) };
   if (o.kind === 'withdrawal') {
     const w = o.w;

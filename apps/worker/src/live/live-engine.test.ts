@@ -6,164 +6,11 @@ import { FakeWallet, ADDR, NET } from '../testing/fake-wallet';
 import { testConfig } from '../testing/synthetic-inputs';
 import { WithdrawReportMsgSchema, WithdrawRequestMsgSchema, decodeMessage, encodeMessage, type WithdrawReportMsg, type WithdrawRequestMsg } from '../withdraw/channel';
 import { DEFAULT_WITHDRAWER, MemoryJournal, Withdrawer } from '../withdraw/withdrawer';
-import { LiveEngine, type LiveEngineOptions, type LiveInputRecord, type LiveOutput, type WithdrawRequest } from './live-engine';
+import { withRunSalt } from '../strategy-config';
+import { Harness, SYM, opts as harnessOpts } from '../testing/live-harness';
+import { LiveEngine, liveConfigHash, type LiveEngineOptions, type LiveOutput, type WithdrawRequest } from './live-engine';
 
-const opts: LiveEngineOptions = { config: testConfig, capitalQuote: 15 };
-const SYM = 'SOLUSDT';
-
-type Dec = InstanceType<typeof BN>;
-type VOrder = { orderId: string; side: 'BUY' | 'SELL'; price: string; qty: Dec; filled: Dec };
-
-/**
- * Closed loop: engine outputs → a fake MEXC (orders, balances, trades) → exchange replies as
- * input records → engine. Every input is recorded, so the session can be replayed afterwards.
- */
-class Harness {
-  readonly inputs: LiveInputRecord[] = [];
-  readonly outs: LiveOutput[] = [];
-  readonly open = new Map<string, VOrder>();
-  readonly done = new Map<string, { status: 'FILLED' | 'CANCELED'; o: VOrder }>();
-  readonly trades: Array<Extract<ExecEvent, { kind: 'fill' }>> = [];
-  quote = new BN(15);
-  base = new BN(0);
-  ts = 1_000_000;
-  seq = 0;
-  placeMode: 'ack' | 'reject' | 'unknown-placed' | 'unknown-not-placed' = 'ack';
-  dropStreamFills = false;
-  stripClientIds = false;
-  autoSync = true;
-  /** The withdrawer side (E9): sees every withdraw request; answers by calling `withdrawAnswer`. */
-  onWithdrawRequest: ((r: WithdrawRequest) => void) | undefined;
-  private queue: LiveInputRecord[] = [];
-
-  constructor(public engine = new LiveEngine(opts)) {}
-
-  feed(r: LiveInputRecord): void {
-    this.queue.push(r);
-    while (this.queue.length > 0) {
-      const x = this.queue.shift()!;
-      this.inputs.push(x);
-      for (const o of this.engine.process(x)) {
-        this.outs.push(o);
-        this.handle(o);
-      }
-    }
-  }
-
-  private exec(e: ExecEvent): void {
-    this.queue.push({ t: 'exec', ts: e.ts, e });
-  }
-
-  private now(): number {
-    return ++this.ts;
-  }
-
-  private snap(cid: string, o: VOrder, status: string): ExecEvent {
-    return { kind: 'order', ts: this.now(), symbol: SYM, clientOrderId: cid, orderId: o.orderId, side: o.side, status: status as 'NEW', statusCode: null, price: o.price, qty: o.qty.toFixed(), cumQty: o.filled.toFixed(), remainQty: o.qty.minus(o.filled).toFixed(), source: 'rest' };
-  }
-
-  private cancelOne(cid: string): void {
-    const o = this.open.get(cid);
-    if (!o) return this.exec({ kind: 'unknown', ts: this.now(), clientOrderId: cid, op: 'cancel', detail: 'Unknown order sent' });
-    this.open.delete(cid);
-    this.done.set(cid, { status: 'CANCELED', o });
-    this.exec(this.snap(cid, o, o.filled.isZero() ? 'CANCELED' : 'PARTIALLY_CANCELED'));
-  }
-
-  private handle(o: LiveOutput): void {
-    if (o.kind === 'action' && o.action.kind === 'place') {
-      const a = o.action;
-      const vo: VOrder = { orderId: `X${++this.seq}`, side: a.side, price: a.price, qty: new BN(a.qty), filled: new BN(0) };
-      if (this.placeMode === 'reject') return this.exec({ kind: 'reject', ts: this.now(), clientOrderId: a.clientOrderId, op: 'place', reason: 'post only would cross', code: 30010 });
-      if (this.placeMode !== 'unknown-not-placed') this.open.set(a.clientOrderId, vo);
-      if (this.placeMode.startsWith('unknown')) return this.exec({ kind: 'unknown', ts: this.now(), clientOrderId: a.clientOrderId, op: 'place', detail: 'TimeoutError' });
-      this.exec({ kind: 'ack', ts: this.now(), clientOrderId: a.clientOrderId, orderId: vo.orderId });
-      return;
-    }
-    if (o.kind === 'action' && o.action.kind === 'cancel') return this.cancelOne(o.action.clientOrderId);
-    if (o.kind === 'withdraw_request') return this.onWithdrawRequest?.(o);
-    if (o.kind !== 'request') return;
-    switch (o.op) {
-      case 'cancel':
-        return this.cancelOne(o.clientOrderId);
-      case 'cancel_all':
-        for (const cid of [...this.open.keys()]) this.cancelOne(cid);
-        return;
-      case 'query': {
-        const op = this.open.get(o.clientOrderId);
-        const d = this.done.get(o.clientOrderId);
-        if (op) return this.exec(this.snap(o.clientOrderId, op, op.filled.isZero() ? 'NEW' : 'PARTIALLY_FILLED'));
-        if (d) return this.exec(this.snap(o.clientOrderId, d.o, d.status));
-        return this.exec({ kind: 'missing', ts: this.now(), clientOrderId: o.clientOrderId });
-      }
-      case 'trades':
-        for (const t of this.trades) this.exec({ ...t, ts: this.now() });
-        return;
-      case 'sync':
-        if (!this.autoSync) return;
-        for (const t of this.trades) this.exec({ ...t, ts: this.now() }); // recent fills first (deduplicated)
-        this.queue.push(this.syncRecord(o.epoch));
-        return;
-    }
-  }
-
-  syncRecord(epoch: number): LiveInputRecord {
-    return {
-      t: 'sync', ts: this.now(), epoch, open: [...this.open].map(([clientOrderId, o]) => ({ clientOrderId, orderId: o.orderId })),
-      balances: { USDT: { free: this.quote.toFixed(), locked: '0' }, SOL: { free: this.base.toFixed(), locked: '0' } },
-    };
-  }
-
-  market(ms: number, bid = 88, ask = 88.1): void {
-    const end = this.ts + ms;
-    while (this.ts < end) {
-      this.ts += 250;
-      this.feed({ t: 'book', venue: 'local', ts: this.ts, bid, bidQty: 5, ask, askQty: 5 });
-      if (this.ts % 1000 < 250) this.feed({ t: 'clock', ts: this.ts });
-    }
-  }
-
-  stream(up: boolean): void {
-    this.feed({ t: 'stream', ts: this.now(), up, ...(up ? {} : { reason: 'test' }) });
-  }
-
-  /** Fills one of our resting orders on the exchange (a taker hits it). */
-  fill(side: 'BUY' | 'SELL', qty?: string): Extract<ExecEvent, { kind: 'fill' }> {
-    const [cid, o] = [...this.open].find(([, x]) => x.side === side)!;
-    const q = qty ? new BN(qty) : o.qty.minus(o.filled);
-    o.filled = o.filled.plus(q);
-    const notional = q.times(o.price);
-    if (side === 'BUY') { this.quote = this.quote.minus(notional); this.base = this.base.plus(q); } else { this.quote = this.quote.plus(notional); this.base = this.base.minus(q); }
-    if (o.filled.gte(o.qty)) { this.open.delete(cid); this.done.set(cid, { status: 'FILLED', o }); }
-    const t: Extract<ExecEvent, { kind: 'fill' }> = {
-      kind: 'fill', ts: this.now(), symbol: SYM, clientOrderId: this.stripClientIds ? '' : cid, orderId: o.orderId, tradeId: `T${++this.seq}`, side,
-      price: o.price, qty: q.toFixed(), fee: '0', feeAsset: 'USDT', isMaker: true, selfTrade: false,
-    };
-    this.trades.push(t);
-    if (!this.dropStreamFills) this.feed({ t: 'exec', ts: t.ts, e: t });
-    return t;
-  }
-
-  /** The withdrawer's report (queued like any exchange answer). */
-  withdrawAnswer(a: Omit<Extract<LiveInputRecord, { t: 'withdraw' }>, 't' | 'ts'>): void {
-    this.queue.push({ t: 'withdraw', ts: this.now(), ...a });
-  }
-
-  /** Opens the session: market, user stream up, opening sync. */
-  start(): void {
-    this.market(3_000);
-    this.stream(true);
-    this.market(12_000);
-  }
-
-  get holds(): Array<string | null> {
-    return this.outs.flatMap((o) => (o.kind === 'action' && o.action.kind === 'status' && o.action.reason.startsWith('venue') ? [o.action.reason] : []));
-  }
-
-  outputHash(): string {
-    return crypto.createHash('sha256').update(JSON.stringify(this.outs)).digest('hex');
-  }
-}
+const opts = harnessOpts;
 
 const places = (outs: LiveOutput[]) => outs.filter((o) => o.kind === 'action' && o.action.kind === 'place');
 const requests = (outs: LiveOutput[], op: string) => outs.filter((o) => o.kind === 'request' && o.op === op);
@@ -331,6 +178,62 @@ describe('LiveEngine: orders and fills', () => {
     h.open.set('manual-1', { orderId: 'X1000', side: 'SELL', price: '99.00', qty: new BN('0.05'), filled: new BN(0) });
     h.market(65_000);
     expect(h.engine.venueHold).toBe('fatal:foreign_order');
+  });
+});
+
+describe('LiveEngine: a new run of the same bot (capital ladder, new parameters)', () => {
+  it("ignores the previous run's recent fills: the opening balances already contain them", () => {
+    // D1 traded until a moment ago; D2 boots on the same account (flat, as the gate requires).
+    const h = new Harness(new LiveEngine(withRunSalt({ ...opts, capitalQuote: 15 }, liveConfigHash)));
+    const old = (n: number, side: 'BUY' | 'SELL', cid: string): Extract<ExecEvent, { kind: 'fill' }> => ({
+      kind: 'fill', ts: 0, symbol: SYM, clientOrderId: cid, orderId: `OLD${n}`, tradeId: `OLD${n}`, side, price: '88.05', qty: '0.05', fee: '0', feeAsset: 'USDT', isMaker: true, selfTrade: false,
+    });
+    // The 15-minute trade lookback keeps returning them on every sync, before and after opening.
+    h.trades.push(old(1, 'BUY', 'cfab12cd0b'), old(2, 'SELL', 'cfab12cd1s'), old(3, 'BUY', ''));
+    h.start();
+    h.market(5 * 60_000);
+    expect(h.engine.venueHold).toBeNull();
+    expect(h.engine.fillCount).toBe(0);
+    expect(h.engine.ledger.balance('cash:USDT', 'USDT').toFixed()).toBe('15');
+    expect(h.outs.filter((o) => o.kind === 'exec_warning' || o.kind === 'reconcile')).toEqual([]);
+    expect(status(h).status).toBe('running');
+    // ...while this run's own fills are booked as usual.
+    h.fill('BUY');
+    h.market(70_000);
+    expect(h.engine.fillCount).toBe(1);
+    expect(h.engine.ledger.balance('cash:SOL', 'SOL').toFixed()).toBe(h.base.toFixed());
+    expect(h.engine.ledger.balance('cash:USDT', 'USDT').toFixed()).toBe(h.quote.toFixed());
+  });
+
+  it('two runs never share an order or withdrawal id; the salt is stable across restarts', () => {
+    const d1 = withRunSalt({ ...opts, capitalQuote: 15 }, liveConfigHash);
+    const d2 = withRunSalt({ ...opts, capitalQuote: 50 }, liveConfigHash);
+    expect(withRunSalt({ ...opts, capitalQuote: 15 }, liveConfigHash)).toEqual(d1); // same run after a restart
+    expect(withRunSalt(d1, liveConfigHash)).toEqual(d1); // idempotent
+    expect(d1.config.idSalt).toMatch(/^[0-9a-f]{12}$/);
+    expect(d1.config.idSalt).not.toBe(d2.config.idSalt);
+    const firstPlace = (o: LiveEngineOptions) => {
+      const h = new Harness(new LiveEngine(o));
+      h.quote = new BN(o.capitalQuote);
+      h.start();
+      const p = places(h.outs)[0]!;
+      return p.kind === 'action' && p.action.kind === 'place' ? p.action.clientOrderId : '';
+    };
+    const [a, b] = [firstPlace(d1), firstPlace(d2)];
+    expect(a).toMatch(/^cf[0-9a-z]+$/);
+    expect(a.slice(0, 8)).not.toBe(b.slice(0, 8)); // "cf" + run tag
+  });
+
+  it('every order status the strategy is told is also an output (for persistence)', () => {
+    const h = new Harness();
+    h.start();
+    const placed = places(h.outs).map((o) => (o.kind === 'action' && o.action.kind === 'place' ? o.action.clientOrderId : ''));
+    const statuses = h.outs.flatMap((o) => (o.kind === 'order_status' ? [o] : []));
+    expect(placed.length).toBeGreaterThan(0);
+    for (const cid of placed) expect(statuses.some((x) => x.clientOrderId === cid && x.status === 'NEW')).toBe(true);
+    h.placeMode = 'reject';
+    h.market(30_000);
+    expect(h.outs.some((o) => o.kind === 'order_status' && o.status === 'REJECTED')).toBe(true);
   });
 });
 

@@ -42,6 +42,14 @@ export const canStillFill = (s: OrderStatus): boolean => !isTerminal(s) && s !==
 /** 6-char stable tag of a bot id (fits the 32-char clientOrderId limit). */
 export const botTag = (botId: string): string => shortHash(botId, 6);
 
+/**
+ * Tag of one bot *run*: ids (client orders, withdrawals) must never repeat across runs of the same
+ * bot — e.g. the capital ladder D1 -> D2 starts a new run whose order and withdrawal counters
+ * restart at 0. With an `idSalt` (the run's config hash) every run gets its own id space.
+ */
+export const strategyTag = (cfg: { botId: string; idSalt?: string }): string =>
+  botTag(cfg.idSalt ? `${cfg.botId}#${cfg.idSalt}` : cfg.botId);
+
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 /**

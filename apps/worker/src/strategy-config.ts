@@ -23,3 +23,14 @@ export function shadowStrategyConfig(botId: string, info: VenueSymbolInfo, start
     },
   };
 }
+
+/**
+ * Salt the run's generated ids with its own configuration hash (computed without the salt, so it
+ * is stable across restarts). A new run of the same bot — new parameters, or the next capital
+ * stage — then never reuses an order or withdrawal id of an older run.
+ */
+export function withRunSalt<O extends { config: StrategyConfig }>(opts: O, configHash: (o: O) => string): O {
+  const { idSalt: _old, ...config } = opts.config;
+  const unsalted = { ...opts, config } as O;
+  return { ...unsalted, config: { ...config, idSalt: configHash(unsalted).slice(0, 12) } };
+}

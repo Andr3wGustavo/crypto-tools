@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import {
   BN, DEFAULT_TREASURY, Ledger, MarketMakerStrategy, NigEstimator, TreasuryPolicy, WITHDRAWAL_TERMINAL, WithdrawalTransitionError,
-  botTag, canonicalJson, captureState, nextWithdrawalStatus, restoreState, withdrawalId,
-  type LedgerTransaction, type SimEvent, type StrategyConfig, type WithdrawalRecord,
+  canonicalJson, captureState, nextWithdrawalStatus, restoreState, strategyTag, withdrawalId,
+  type LedgerTransaction, type OrderStatus, type SimEvent, type StrategyConfig, type WithdrawalRecord,
 } from '@cortex/core';
 import type { ExecEvent } from '@cortex/exchange';
 import { ENGINE_BEHAVIOR_VERSION, type EngineOutput, type EngineSnapshot, type InputRecord } from '../engine/shadow-engine';
@@ -50,7 +50,9 @@ export type LiveOutput =
   | { kind: 'sync'; ts: number; ok: boolean; reason: string; diffs: Array<{ asset: string; ledger: string; exchange: string }> }
   | { kind: 'exec_warning'; ts: number; message: string }
   /** A booked exchange fill, in the same shape as a simulated one (dashboard, alerts, fills page). */
-  | { kind: 'exec_fill'; event: Extract<SimEvent, { kind: 'fill' }> & { tradeId: string; isMaker: boolean } }
+  | { kind: 'exec_fill'; event: Omit<Extract<SimEvent, { kind: 'fill' }>, 'feeAsset'> & { feeAsset: 'quote' | 'base'; tradeId: string; isMaker: boolean } }
+  /** An order status the exchange reported and the strategy was told (persistence, audit). */
+  | { kind: 'order_status'; ts: number; clientOrderId: string; status: OrderStatus; reason?: string }
   | WithdrawRequest
   /** A withdrawal was created or changed status. */
   | { kind: 'withdrawal'; ts: number; w: WithdrawalRecord }
@@ -128,6 +130,7 @@ type Dec = InstanceType<typeof BN>;
 const RECONCILE_TOL = 1e-9;
 const EPS = 1e-12;
 const ORDER_ID_MEMORY = 2_000;
+const PRE_OPEN_TRADE_MEMORY = 1_000;
 const SKIP = ['o', 'book', 'configHash', 'symbol', 'ourPrefix', 'policy', 'tcfg'] as const;
 const SKIM_EVERY_MS = 60_000;
 const KEEP_FINAL_WITHDRAWALS = 50;
@@ -169,6 +172,8 @@ export class LiveEngine {
   private health = { errorsLastMin: 0, eventLoopLagMs: 0, clockSkewMs: 0 };
   private reconcileDiverged = false;
   private opened = false;
+  /** Trades seen before opening: already inside the opening balances, never booked (bounded). */
+  private preOpenTrades = new Set<string>();
   private streamUp = false;
   private syncPending = true;
   private rateHoldUntil = Number.NEGATIVE_INFINITY;
@@ -210,7 +215,7 @@ export class LiveEngine {
       withdrawal: w ? { minAmount: w.minAmount, cooldownMs: w.cooldownMs, dailyCap: w.dailyCap, floor: 0 } : DEFAULT_TREASURY.withdrawal,
     });
     this.symbol = `${o.config.base}${o.config.quote}`.toUpperCase();
-    this.ourPrefix = `cf${botTag(o.config.botId)}`;
+    this.ourPrefix = `cf${strategyTag(o.config)}`;
   }
 
   get ledger(): Ledger {
@@ -386,6 +391,14 @@ export class LiveEngine {
 
   private onFill(ts: number, e: Extract<ExecEvent, { kind: 'fill' }>, out: LiveOutput[]): void {
     if (e.symbol && e.symbol !== this.symbol) return;
+    // Before opening the strategy has no order (boot cancels all first), so a trade seen now is
+    // older activity — e.g. the previous run's last fills, returned by the 15-minute trade
+    // lookback — and the opening balances already contain it. It is never booked, now or later.
+    if (!this.opened) {
+      if (this.preOpenTrades.size < PRE_OPEN_TRADE_MEMORY) this.preOpenTrades.add(e.tradeId);
+      return;
+    }
+    if (this.preOpenTrades.has(e.tradeId)) return;
     const cid = e.clientOrderId || this.orderIds.get(e.orderId) || '';
     if (cid && !this.isOurs(cid)) {
       this.setFatal('foreign_fill', ts, out, `trade ${e.tradeId} of ${cid} on ${this.symbol}`);
@@ -419,7 +432,7 @@ export class LiveEngine {
     out.push({ kind: 'ledger', txId });
     out.push({
       kind: 'exec_fill',
-      event: { kind: 'fill', ts, clientOrderId: cid, fillId: e.tradeId, tradeId: e.tradeId, side: e.side, price: Number(e.price), qty: Number(e.qty), fee: feeKnown ? fee.toNumber() : 0, feeAsset: 'quote', isMaker: e.isMaker },
+      event: { kind: 'fill', ts, clientOrderId: cid, fillId: e.tradeId, tradeId: e.tradeId, side: e.side, price: Number(e.price), qty: Number(e.qty), fee: feeKnown ? fee.toNumber() : 0, feeAsset, isMaker: e.isMaker },
     });
     if (!e.isMaker) out.push({ kind: 'exec_warning', ts, message: `taker fill ${e.tradeId} on a post-only order` });
     this.feed({
@@ -616,7 +629,7 @@ export class LiveEngine {
     const quote = this.o.config.quote;
     const amount = new BN(d.amount).decimalPlaces(2, BN.ROUND_DOWN);
     if (!amount.gt(0)) return;
-    const id = withdrawalId(botTag(this.o.config.botId), this.wdSeq + 1);
+    const id = withdrawalId(strategyTag(this.o.config), this.wdSeq + 1);
     try {
       this.book.post(Ledger.transfer(`${id}-reserve`, ts, 'withdrawal_reserve', 'treasury', 'withdrawing', quote, amount));
     } catch (err) {
@@ -750,6 +763,7 @@ export class LiveEngine {
   }
 
   private feed(ev: Parameters<MarketMakerStrategy['handle']>[0], out: LiveOutput[]): void {
+    if (ev.kind === 'order') out.push({ kind: 'order_status', ts: ev.ts, clientOrderId: ev.clientOrderId, status: ev.status, ...(ev.reason ? { reason: ev.reason } : {}) });
     for (const a of this.strategy.handle(ev)) {
       out.push({ kind: 'action', action: a });
       if (a.kind === 'place' || a.kind === 'cancel') this.requestedAt.set(a.clientOrderId, a.ts);
@@ -832,4 +846,4 @@ export class LiveEngine {
 }
 
 /** 2: treasury fields (E9). */
-export const LIVE_STATE_VERSION = 3; // v3: strategy risk-emission state (2026-11-13)
+export const LIVE_STATE_VERSION = 4; // v3: strategy risk-emission state (2026-11-13); v4: pre-open trades (2026-11-14)

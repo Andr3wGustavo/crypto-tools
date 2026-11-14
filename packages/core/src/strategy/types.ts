@@ -7,6 +7,11 @@ import type { VolParams } from '../stats/vol';
 
 export interface StrategyConfig {
   botId: string;
+  /**
+   * Run salt for generated ids (see `strategyTag`). The workers set it to a hash of the run's
+   * unsalted configuration, so a new run never reuses an order or withdrawal id of an older one.
+   */
+  idSalt?: string;
   base: string;
   quote: string;
   rules: SymbolRules;
