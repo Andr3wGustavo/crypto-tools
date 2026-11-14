@@ -12,6 +12,8 @@ describe('order FSM', () => {
     s = nextStatus(s, 'partial_fill'); // late fill while cancelling
     expect(s).toBe('CANCEL_REQ');
     expect(nextStatus(s, 'canceled')).toBe('CANCELED');
+    // Cancel requested while the placement was in flight, then the venue rejects the placement.
+    expect(nextStatus(nextStatus('SENT', 'cancel_request'), 'rejected')).toBe('REJECTED');
   });
 
   it('resolves UNKNOWN through reconciliation and rejects illegal moves', () => {

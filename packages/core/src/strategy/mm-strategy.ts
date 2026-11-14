@@ -176,6 +176,10 @@ export class MarketMakerStrategy {
       o.status = nextStatus(o.status, ev);
     } catch (err) {
       out.push({ kind: 'error', ts: e.ts, message: (err as Error).message });
+      // The exchange is the source of truth: an order it reports as gone IS gone. Keeping it as
+      // a phantom in CANCEL_REQ would freeze that side forever (no new quote while a cancel is in
+      // flight). Any other surprising report keeps the order, which stays fail-closed.
+      if (ev === 'canceled' || ev === 'rejected' || ev === 'expired') this.orders.delete(o.clientOrderId);
       return;
     }
     if (o.status === 'CANCELED' || o.status === 'REJECTED' || o.status === 'EXPIRED') this.orders.delete(o.clientOrderId);
@@ -392,6 +396,9 @@ export class MarketMakerStrategy {
         {
           orderNotional,
           bidNotional,
+          // Normal mode: the cap is hard, rounding up to the minimum may not cross it. Dust mode
+          // may cross it by the one minimum order that makes the position sellable.
+          ...(dust ? {} : { bidNotionalMax: maxInv - invNotional }),
           costBps,
           reduceMinEdgeBps,
           pennyMinSpreadTicks: this.cfg.pennyMinSpreadTicks,

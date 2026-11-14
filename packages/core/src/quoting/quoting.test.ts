@@ -136,6 +136,9 @@ describe('buildQuoteOrders', () => {
       const tiny = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0 }, { ...params, bidNotional: 0.05 });
       expect(tiny.bid).toBeUndefined(); // more than one step away: refused, not inflated
       expect(tiny.skipped).toContainEqual({ side: 'BUY', reason: 'below_min' });
+      // …and never past a hard ceiling (the room under the inventory cap): 0.02 = US$1.76 > 1.5.
+      const capped = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0 }, { ...params, bidNotional: 1.5, bidNotionalMax: 1.5 });
+      expect(capped.bid).toBeUndefined();
     });
 
     it('sells everything instead of leaving unsellable dust', () => {

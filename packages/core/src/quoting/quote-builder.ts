@@ -30,6 +30,9 @@ export interface BuildParams {
    * inventory cap, or the minimum order that makes stuck dust sellable). Defaults to orderNotional.
    */
   bidNotional?: number;
+  /** Hard ceiling for the bid's value (the room under the inventory cap). Rounding up to the
+   *  exchange minimum never goes past it. Default: no ceiling beyond the one-step rule. */
+  bidNotionalMax?: number;
   costBps: number;
   /** Minimum edge (bps vs fair) on the inventory-reducing side; decays with inventory age. */
   reduceMinEdgeBps: number;
@@ -124,7 +127,8 @@ export function buildQuoteOrders(
     if (p > 0 && (new BN(qty).lt(rules.minQty) || Number(qty) * p < rules.minNotional)) {
       const minValid = BN.max(new BN(ceilToStep(new BN(rules.minNotional).div(price), rules.stepSize)), new BN(rules.minQty));
       const v = minValid.times(price);
-      if (v.gte(rules.minNotional) && v.lte(new BN(target).plus(new BN(rules.stepSize).times(price)))) qty = minValid.toFixed(decimalsOf(rules.stepSize));
+      const ceiling = BN.min(new BN(target).plus(new BN(rules.stepSize).times(price)), params.bidNotionalMax ?? Number.POSITIVE_INFINITY);
+      if (v.gte(rules.minNotional) && v.lte(ceiling)) qty = minValid.toFixed(decimalsOf(rules.stepSize));
     }
     const value = Number(qty) * p;
     if (edge < params.costBps) res.skipped.push({ side: 'BUY', reason: 'insufficient_edge' });

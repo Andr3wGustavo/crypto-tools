@@ -13,8 +13,10 @@ const T: Record<OrderStatus, Partial<Record<OrderEvent, OrderStatus>>> = {
   SENT: { ack: 'NEW', partial_fill: 'PARTIAL', fill: 'FILLED', rejected: 'REJECTED', canceled: 'CANCELED', cancel_request: 'CANCEL_REQ', timeout: 'UNKNOWN', expired: 'EXPIRED' },
   NEW: { ack: 'NEW', partial_fill: 'PARTIAL', fill: 'FILLED', cancel_request: 'CANCEL_REQ', canceled: 'CANCELED', expired: 'EXPIRED', timeout: 'UNKNOWN' },
   PARTIAL: { partial_fill: 'PARTIAL', fill: 'FILLED', cancel_request: 'CANCEL_REQ', canceled: 'CANCELED', expired: 'EXPIRED', timeout: 'UNKNOWN' },
-  // A cancel can race with fills: late fills keep the order in CANCEL_REQ (or FILLED).
-  CANCEL_REQ: { ack: 'CANCEL_REQ', partial_fill: 'CANCEL_REQ', fill: 'FILLED', canceled: 'CANCELED', expired: 'EXPIRED', cancel_request: 'CANCEL_REQ', timeout: 'UNKNOWN' },
+  // A cancel can race with fills: late fills keep the order in CANCEL_REQ (or FILLED). It can also
+  // race with the placement itself: cancel requested while the order was in flight, then the
+  // venue rejects the placement (post-only would cross) → REJECTED.
+  CANCEL_REQ: { ack: 'CANCEL_REQ', partial_fill: 'CANCEL_REQ', fill: 'FILLED', canceled: 'CANCELED', rejected: 'REJECTED', expired: 'EXPIRED', cancel_request: 'CANCEL_REQ', timeout: 'UNKNOWN' },
   UNKNOWN: { reconcile_new: 'NEW', reconcile_filled: 'FILLED', reconcile_canceled: 'CANCELED', ack: 'NEW', partial_fill: 'PARTIAL', fill: 'FILLED', canceled: 'CANCELED', rejected: 'REJECTED', expired: 'EXPIRED', timeout: 'UNKNOWN' },
   FILLED: {},
   CANCELED: {},

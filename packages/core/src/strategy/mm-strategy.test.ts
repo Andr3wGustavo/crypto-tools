@@ -277,6 +277,19 @@ describe('live hooks: venue hold and unknown order state (never exercised in sha
     expect(again.some((a) => a.kind === 'place' && a.side === 'BUY')).toBe(true);
   });
 
+  it('a cancel that races a rejected placement frees the side (it used to freeze it forever)', () => {
+    const { s, h } = quoting();
+    const bid = s.snapshot().workingOrders.find((o) => o.side === 'BUY')!;
+    // Reprice → cancel requested; the venue then reports the placement itself as REJECTED.
+    h({ kind: 'book', venue: 'local', ts: 12_400, bid: 149, bidQty: 5, ask: 149.1, askQty: 5 });
+    expect(s.workingOrder(bid.clientOrderId)?.status).toBe('CANCEL_REQ');
+    const r = h({ kind: 'order', ts: 12_500, clientOrderId: bid.clientOrderId, status: 'REJECTED' });
+    expect(r.filter((a) => a.kind === 'error')).toEqual([]);
+    expect(s.workingOrder(bid.clientOrderId)).toBeUndefined();
+    const next = h({ kind: 'book', venue: 'local', ts: 13_000, bid: 149, bidQty: 5, ask: 149.1, askQty: 5 });
+    expect(next.some((a) => a.kind === 'place' && a.side === 'BUY')).toBe(true);
+  });
+
   it('an UNKNOWN order that turns out to be resting goes back to NEW; one that filled becomes FILLED', () => {
     const { s, h } = quoting();
     const [a, b] = s.snapshot().workingOrders;
