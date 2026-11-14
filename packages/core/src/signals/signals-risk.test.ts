@@ -52,6 +52,20 @@ describe('MarkoutTracker', () => {
     expect(m.adverseSelectionBps()).toBeCloseTo(0, 9);
   });
 
+  it('adverse selection is measured from the fair price at the fill, not from the fill price', () => {
+    // Bought 5 bps under fair (100); 5 s later fair is 99.97: the fill still made +2 bps, but the
+    // price moved 3 bps against us. That 3 bps is the cost to quote for; the old formula (from the
+    // fill price) saw −2 → floored to 0, understating the cost by the captured half spread.
+    const m = new MarkoutTracker({ horizonsMs: [5000], referenceHorizonMs: 5000, priorAsBps: 0, priorWeight: 0 });
+    m.addFill({ id: 'b', side: 'BUY', price: 99.95, ts: 0, mid: 100 });
+    const [r] = m.onMid(5000, 99.97);
+    expect(r!.bps).toBeCloseTo(2.0010, 3); // markout: the fill's own PnL
+    expect(m.adverseSelectionBps()).toBeCloseTo(3, 9);
+    m.addFill({ id: 's', side: 'SELL', price: 100.05, ts: 6000, mid: 100 });
+    m.onMid(11_000, 100.01); // sold 5 above fair, fair rose 1 bp against us
+    expect(m.adverseSelectionBps()).toBeCloseTo((3 + 1) / 2, 9);
+  });
+
   it('shrinks toward the prior and never goes negative', () => {
     const m = new MarkoutTracker({ horizonsMs: [1000], referenceHorizonMs: 1000, priorAsBps: 2, priorWeight: 20 });
     expect(m.adverseSelectionBps()).toBe(2);

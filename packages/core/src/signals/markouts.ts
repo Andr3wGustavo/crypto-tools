@@ -1,15 +1,26 @@
 /**
- * Markouts: how the mid moved after each of our fills (positive = good for us).
- *   BUY  fill at p: (mid(t+h)/p − 1)·1e4
- *   SELL fill at p: (1 − mid(t+h)/p)·1e4
- * Adverse selection estimate AS = −mean(markout at the reference horizon), shrunk toward a prior
- * and floored at 0. It is the "c" (cost) in δ* = c + 1/k.
+ * Two numbers per fill, the standard decomposition of a market maker's fill:
+ *
+ * - Markout (reported): the fill's PnL marked at t+h, from the FILL PRICE (positive = good).
+ *     BUY at p: (mid(t+h)/p − 1)·1e4      SELL at p: (1 − mid(t+h)/p)·1e4
+ *   It equals the half spread we captured minus the adverse move.
+ *
+ * - Adverse selection (the cost "c" in δ* = c + 1/k): how far the fair price moved AGAINST us
+ *   after the fill, from the fair price AT THE FILL (m0):
+ *     BUY: (1 − mid(t+h)/m0)·1e4           SELL: (mid(t+h)/m0 − 1)·1e4
+ *   AS = mean at the reference horizon, shrunk toward a prior, floored at 0.
+ *
+ * Fixed 2026-11-13: AS used to be −mean(markout), i.e. measured from the fill price, so it was
+ * (true AS − captured half spread) and almost always floored to 0: the quoting cost was
+ * understated by the half spread and the bot quoted too tight against informed flow.
  */
 export interface MarkoutFill {
   id: string;
   side: 'BUY' | 'SELL';
   price: number;
   ts: number;
+  /** Fair (or mid) price when the fill happened. Defaults to the fill price. */
+  mid?: number;
 }
 
 export interface MarkoutResult {
@@ -34,14 +45,14 @@ export const DEFAULT_MARKOUTS: MarkoutParams = {
 };
 
 export class MarkoutTracker {
-  private pending: Array<MarkoutFill & { done: Set<number> }> = [];
+  private pending: Array<MarkoutFill & { m0: number; done: Set<number> }> = [];
   private sum = 0;
   private count = 0;
 
   constructor(private readonly p: MarkoutParams = DEFAULT_MARKOUTS) {}
 
   addFill(f: MarkoutFill): void {
-    this.pending.push({ ...f, done: new Set() });
+    this.pending.push({ ...f, m0: f.mid !== undefined && f.mid > 0 ? f.mid : f.price, done: new Set() });
   }
 
   onMid(ts: number, mid: number): MarkoutResult[] {
@@ -54,7 +65,7 @@ export class MarkoutTracker {
         f.done.add(h);
         out.push({ fillId: f.id, horizonMs: h, bps, ts });
         if (h === this.p.referenceHorizonMs) {
-          this.sum += bps;
+          this.sum += f.side === 'BUY' ? (1 - mid / f.m0) * 1e4 : (mid / f.m0 - 1) * 1e4;
           this.count++;
         }
       }
@@ -66,7 +77,7 @@ export class MarkoutTracker {
   /** Shrunk adverse-selection estimate in bps (≥ 0). */
   adverseSelectionBps(): number {
     const w = this.p.priorWeight;
-    const est = (w * this.p.priorAsBps + -this.sum) / (w + this.count);
+    const est = (w * this.p.priorAsBps + this.sum) / (w + this.count);
     return Math.max(0, est);
   }
 

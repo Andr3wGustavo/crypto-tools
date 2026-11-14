@@ -205,7 +205,7 @@ export class MarketMakerStrategy {
     } catch (err) {
       out.push({ kind: 'error', ts: e.ts, message: (err as Error).message });
     }
-    this.markouts.addFill({ id: e.fillId, side: e.side, price: e.price, ts: e.ts });
+    this.markouts.addFill({ id: e.fillId, side: e.side, price: e.price, ts: e.ts, mid: this.lastFair });
     const o = this.orders.get(e.clientOrderId);
     if (o) {
       o.filled += e.qty;

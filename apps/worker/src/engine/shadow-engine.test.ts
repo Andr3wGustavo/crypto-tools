@@ -20,10 +20,10 @@ const meta = { config, startQuote: 15, latencyMs: 150, info: { makerFeeRate: 0 }
 describe('ShadowEngine', () => {
   it('golden: shadow decisions are frozen (any change here is a new experiment, not a refactor)', () => {
     // Re-pinned 2026-11-13 for behavior v2 (AFK review: dead-zone + float-residue fixes, inventory cap
-    // under the risk hard cap, risk events on change). v1 froze after ~3 min of this market: 78 fills.
+    // under the risk hard cap, risk events on change, adverse selection from the fair price). v1 froze after ~3 min of this market: 78 fills.
     const { hash, engine } = runHash(inputs(60));
-    expect(engine.fillCount).toBe(783);
-    expect(hash).toBe('6d4ec2bc56d8af64e53d476d4aa514204079198c12717a5f6b1a1ae773ba01f4');
+    expect(engine.fillCount).toBe(762);
+    expect(hash).toBe('ac9473fd43d5bc7fce9b986d8ce2d2d492b54fd432ddf9de2a0498283e5be15c');
   });
 
   it('replay is bit-exact, including through the gzip NDJSON recorder', async () => {
