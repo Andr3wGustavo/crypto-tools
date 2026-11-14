@@ -1,6 +1,6 @@
 # Cortex Farm — Progress & Evidence
 
-Status: **84 / 100** (E9 treasury + auto-withdraw with the 5 locks built and tested end to end, switched on only by running the separate withdrawer; E8 live execution built and tested, gated closed until GO; its real-API rollout waits on the MEXC trade key + VPS; E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
+Status: **86 / 100** (2026-11-14 AFK logic and math review: 9 engine bugs fixed with regression tests, incl. 3 silent freezes and an understated adverse-selection cost; Revert-style dashboard, English README with media; E9 treasury + auto-withdraw with the 5 locks built and tested end to end, switched on only by running the separate withdrawer; E8 live execution built and tested, gated closed until GO; its real-API rollout waits on the MEXC trade key + VPS; E2 and E3 proven; E4 code + tooling done, waiting on the VPS accounts for the 24 h proof; GO/NO-GO protocol pre-registrable; E5 done; E6 dashboard built and E2E-tested in a real browser, live-on-phone proof waits on the VPS + Tailscale; E1 waits only on the local `docker compose` check) · Plan: [MASTER-PLAN.md](MASTER-PLAN.md) · Branch: `rebuild/cortex-farm`
 
 Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ blocked on user
 
@@ -136,7 +136,7 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
 - ✅ **Evidence**:
   - 206 unit and integration tests (169 before).
   - 5 Playwright E2E runs (desktop 1440×900 and Pixel 7): Phantom sign-in through the UI, every page, no console errors (so no CSP violations), no horizontal scroll, and the command flow (pause → wrong 2FA code refused → valid code → resumed, confirmed in the log).
-  - CI job `e2e` uploads the screenshots. Samples are in [docs/e6](e6/).
+  - CI job `e2e` uploads the screenshots. Current samples (Revert-style redesign, 2026-11-14) are in [docs/media](media/).
 - ✅ **Bugs the tests caught**:
   - Vite inlined fonts as `data:` URIs, which the CSP blocked. Fixed by never inlining assets (the CSP was not relaxed).
   - `/system` was both an API route and a dashboard page, so a reload showed JSON. The API route moved to `/system/info`, with a regression test over every page path.
@@ -212,6 +212,34 @@ Design, locks and assumptions: [E9-DESIGN.md](E9-DESIGN.md).
   - **end to end** (engine ⇄ signed channel ⇄ withdrawer ⇄ fake MEXC: sent once despite many re-asks, confirmed, books equal to the exchange at every sync).
 - ✅ Shadow golden hash unchanged.
 - ⏳ Proof "withdrawal on the on-chain card": needs live + the withdraw key + a treasury of ≥ US$20. At D1 that takes a long time, honestly; this is the machinery for D2/D3.
+
+## AFK logic and math review + Revert-style dashboard (2026-11-13/14)
+
+Found by building a 4-pair demo, soaking it for hours and reading every dashboard page. Each fix has a regression test; the new liveness tests fail on the old code.
+
+| # | Bug (all would have hurt an unattended farm) | Fix | Evidence |
+|---|---|---|---|
+| 1 | **Deadlock:** a partial fill left inventory too small to sell (under the US$1 minimum after step rounding) and too close to the cap to buy. The bot never quoted again, and every health check stayed green. | Bid sized to the room under the cap; dust unstuck with one minimum order; sells never leave dust | Liveness test (all 3 seeds froze before). Real E2 SOL hour: 4 fills / +0.0014 → 12 fills / +0.0070 |
+| 2 | Float residue in sim fills (0.012100000000000001) made a "sell everything" order exceed the exact ledger. The engine then crashed (fail-closed). | Sim quantities snapped to 12 decimals | Sim test |
+| 3 | Float residue in the strategy's own base total (0.01999999999999999). The sell guard dropped the 0.02 while the dust check still saw it, so the bot froze (seed 3, minute 26). | Decimal-exact base total; one `sellableQty()` shared by the builder and the strategy | Liveness 2 h × 7 seeds, max gap 14.5 s |
+| 4 | **Event flood:** risk events were emitted every second. One hour of pause meant 3 600 identical events. | Emitted on change, repeated once a minute, plus one event when risk returns to ok | Strategy test (≤ 4 events in 3 min stale) |
+| 5 | Cap conflict: the strategy cap (20% of equity) exceeded the US$3 risk hard cap above US$15 equity, so `reduce_only` flapped. | Strategy cap = 90% of the hard cap; rounding up to the minimum never crosses it | Strategy test (0 reduce_only at US$25) |
+| 6 | **Math:** adverse selection was measured from the fill price, so it equalled (true AS − captured half spread) and read 0 almost always. The quoting cost was understated. | Standard decomposition: markout from the fill price, AS from the fair price at the fill | Unit test: +2 bps markout, 3 bps AS (old: 0) |
+| 7 | A cancel racing a rejected placement was an "illegal" FSM move. The order stayed a phantom in CANCEL_REQ and **that side never quoted again**. | CANCEL_REQ → REJECTED legal; orders the venue reports gone are dropped | FSM + strategy tests |
+| 8 | The fixed 4 bps toxic threshold made volatile small caps "toxic" most of the time. | Threshold = max(4 bps, 2.5 σ √window) | Lead-lag test |
+| 9 | A quote past the edge floor was **dropped** instead of clamped. With the bid also capped, the bot went minutes without any order (IO: 246 s). | Clamped to the floor and placed | Builder test; IO max gap 246 s → 4.2 s |
+| 10 | Dashboard: Logs showed about 12 rows, because orders and markouts evicted rare events from one shared buffer; first visitors saw "sessão expirou"; quote lines bridged gaps. | Server-side kind filter, separate buffers, expiry only for real sessions, transparent gap segments | Web tests + E2E |
+
+Effects on the bot:
+- The collapse scenario now loses about US$0.10, down from more than US$0.30.
+- ENGINE_BEHAVIOR_VERSION is 2 and the state versions are 3. Old run directories are orphaned by design.
+- The pre-registered protocol is not sealed yet, so nothing official is invalidated.
+
+**Dashboard:** redesigned on revert.finance's language, with tokens measured from the live site. Cortex yellow stays the accent.
+- Layout and type: monospace everywhere, teal-black flat panels.
+- Components: dense positions table, bottom status bar, token avatars, info banners.
+- Media: screenshots, MP4 and GIF in `docs/media`, regenerated with `npm run demo` + `npm run media`.
+- README: rewritten in English for newcomers. Legacy docs moved to `docs/archive/legacy`.
 
 ## Findings to act on
 - **Replay throughput ≈ 13 k records/s** on the dev PC (real E2 hour, 144 178 records in 11 s). A 21-day official evaluation therefore takes up to about 1.5 h per pair at SOL-level activity. Acceptable offline. If it becomes a bottleneck, profile the engine hot path before optimising: the result must stay bit-exact.
