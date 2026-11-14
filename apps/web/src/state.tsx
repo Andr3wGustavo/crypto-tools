@@ -83,7 +83,7 @@ export function useEvents(botIds: string[], kinds?: BotEventKind[], limit = 200)
   const events = useMemo(() => {
     const ids = new Set(botIds);
     const ks = kinds ? new Set<string>(kinds) : undefined;
-    return live.events.filter((e) => ids.has(e.botId) && (!ks || ks.has(e.e.k)));
+    return live.eventsOf(ks).filter((e) => ids.has(e.botId) && (!ks || ks.has(e.e.k)));
   }, [key, kindKey, v]);
   return { events, loading: q.isPending && botIds.length > 0 && live.epoch > 0 };
 }

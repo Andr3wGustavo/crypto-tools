@@ -15,6 +15,9 @@ export const WS_CLOSE_UNAUTHORIZED = 4401;
 export const MAX_POINTS_PER_BOT = 17_280;
 export const MAX_EVENTS = 3_000;
 export const MAX_FILLS = 5_000;
+export const MAX_NOISY = 2_000;
+/** High-rate kinds (several per second per bot): kept apart so they never evict the rare ones. */
+export const NOISY_KINDS: ReadonlySet<string> = new Set(['order', 'markout']);
 
 export type ConnState = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'unauthorized';
 
@@ -64,8 +67,10 @@ export function compareIdsDesc(a: string, b: string): number {
 export class LiveStore {
   views = new Map<string, BotView>();
   points = new Map<string, SeriesPoint[]>();
-  /** Newest first, unique by bot+id. */
+  /** Newest first, unique by bot+id. Rare kinds only (status, risk, edge, fills, commands…). */
   events: StoredEvent[] = [];
+  /** Orders and markouts, newest first (separate bound: their churn must not evict the rest). */
+  noisy: StoredEvent[] = [];
   /** Fills only, newest first (separate bound). */
   fills: StoredEvent[] = [];
   state: ConnState = 'idle';
@@ -84,6 +89,7 @@ export class LiveStore {
   private readonly listeners = new Set<() => void>();
   private readonly seen = new Set<string>();
   private readonly seenFills = new Set<string>();
+  private readonly seenNoisy = new Set<string>();
   private readonly o: Required<LiveOptions>;
 
   constructor(o: LiveOptions) {
@@ -161,8 +167,10 @@ export class LiveStore {
     this.points.clear();
     this.events = [];
     this.fills = [];
+    this.noisy = [];
     this.seen.clear();
     this.seenFills.clear();
+    this.seenNoisy.clear();
     this.actor = null;
     this.changed();
   }
@@ -207,10 +215,22 @@ export class LiveStore {
   }
 
   private addEvents(evs: readonly StoredEvent[]): boolean {
-    const a = addUnique(this.events, this.seen, evs, MAX_EVENTS);
-    // Fills are rare and must not be evicted by order churn: they get their own buffer.
+    // Orders and markouts arrive several times a second per bot: in one shared buffer they pushed
+    // out every risk, status and edge event within minutes. Each class has its own bound.
+    const a = addUnique(this.events, this.seen, evs.filter((s) => !NOISY_KINDS.has(s.e.k)), MAX_EVENTS);
+    const n = addUnique(this.noisy, this.seenNoisy, evs.filter((s) => NOISY_KINDS.has(s.e.k)), MAX_NOISY);
+    // Fills also get their own buffer (the Fills page and the chart markers).
     const b = addUnique(this.fills, this.seenFills, evs.filter((s) => s.e.k === 'fill'), MAX_FILLS, byFillId, newestTsFirst);
-    return a || b;
+    return a || n || b;
+  }
+
+  /** Events of the given kinds (all kinds when omitted), newest first. */
+  eventsOf(kinds?: ReadonlySet<string>): StoredEvent[] {
+    const wantNoisy = !kinds || [...kinds].some((k) => NOISY_KINDS.has(k));
+    const wantRare = !kinds || [...kinds].some((k) => !NOISY_KINDS.has(k));
+    if (!wantNoisy) return this.events;
+    if (!wantRare) return this.noisy;
+    return [...this.events, ...this.noisy].sort(newestIdFirst);
   }
 
 }

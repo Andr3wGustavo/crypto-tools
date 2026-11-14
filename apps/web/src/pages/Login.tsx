@@ -50,26 +50,26 @@ export function Login({ onSignedIn, expired }: { onSignedIn: () => void; expired
     <div className="flex min-h-dvh items-center justify-center px-4">
       <div className="glass w-full max-w-md p-7 sm:p-8">
         <Logo />
-        <h1 className="mt-6 text-2xl font-bold tracking-tight">Console do operador</h1>
+        <h1 className="mt-7 text-xl font-bold tracking-tight">Console do operador</h1>
         <p className="mt-2 text-sm text-muted">
           Entre com a sua carteira Solana. Você assina uma mensagem de login: <strong className="text-ink">não é uma transação</strong>, não custa nada e
           não dá acesso aos seus fundos.
         </p>
-        {expired && <p className="mt-4 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn">Sua sessão expirou. Entre de novo.</p>}
+        {expired && <p className="mt-4 rounded-[8px] border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn">Sua sessão expirou. Entre de novo.</p>}
         <div className="mt-6">
           {phantom ? (
             <Button variant="primary" className="w-full py-3 text-base" onClick={() => void go()} disabled={step !== null}>
               {step ? STEP_LABEL[step] : 'Conectar Phantom'}
             </Button>
           ) : (
-            <div className="rounded-xl border border-line bg-raised p-4 text-sm text-muted">
+            <div className="rounded-[8px] border border-line bg-bg p-4 text-sm text-muted">
               <p className="font-semibold text-ink">Phantom não encontrada.</p>
               <p className="mt-1">No computador, instale a extensão Phantom. No celular, abra este endereço <em>dentro do navegador do app Phantom</em>.</p>
               <a className="mt-3 inline-block text-brand hover:underline" href="https://phantom.com/download" target="_blank" rel="noreferrer noopener">phantom.com/download ↗</a>
             </div>
           )}
         </div>
-        {error && <p role="alert" className={cx('mt-4 rounded-xl border border-down/30 bg-down/10 px-3 py-2 text-sm text-down')}>{error}</p>}
+        {error && <p role="alert" className={cx('mt-4 rounded-[8px] border border-down/30 bg-down/10 px-3 py-2 text-sm text-down')}>{error}</p>}
         <ul className="mt-6 space-y-1.5 text-xs text-faint">
           <li>• Só carteiras autorizadas no servidor entram.</li>
           <li>• Pausar é um clique. Retomar e resetar pedem o código 2FA (TOTP).</li>

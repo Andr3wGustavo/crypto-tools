@@ -18,7 +18,7 @@ export function System() {
         <Link href="/settings" className="glass px-3 py-2 text-sm">⚙ Ajustes</Link>
       </div>
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Sistema</h1>
+        <h1 className="text-xl font-bold tracking-tight">Sistema</h1>
         <p className="text-sm text-muted">Saúde dos processos, dos feeds e da conexão ao vivo.</p>
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -38,7 +38,7 @@ export function System() {
           <KV k="Última mensagem" v={live.lastMessageAt ? fmtAge(Date.now() - live.lastMessageAt) : '—'} />
           <KV k="Desvio do relógio local" v={`${fmtInt(live.clockOffsetMs)} ms`} tone={Math.abs(live.clockOffsetMs) > 2_000 ? 'warn' : 'neutral'} hint="servidor − este aparelho" />
           <KV k="Reconexões (snapshots)" v={fmtInt(Math.max(0, live.epoch - 1))} />
-          <KV k="Eventos em memória" v={`${fmtInt(live.events.length)} + ${fmtInt(live.fills.length)} fills`} />
+          <KV k="Eventos em memória" v={`${fmtInt(live.events.length)} + ${fmtInt(live.noisy.length)} ordens + ${fmtInt(live.fills.length)} fills`} />
         </Card>
         <Card title="Infra">
           <p className="text-sm text-muted">CPU, disco, containers e backups entram com o VPS (E4): node exporter + healthchecks.io. Até lá, a saúde vem dos próprios processos.</p>

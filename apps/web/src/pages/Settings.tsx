@@ -25,7 +25,7 @@ export function Settings({ me, onLogout }: { me: Me; onLogout: () => void }) {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Ajustes</h1>
+        <h1 className="text-xl font-bold tracking-tight">Ajustes</h1>
         <p className="text-sm text-muted">Somente leitura: configuração e segredos ficam no servidor, nunca no navegador.</p>
       </div>
       <div className="grid gap-4 lg:grid-cols-3">

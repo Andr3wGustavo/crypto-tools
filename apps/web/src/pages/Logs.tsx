@@ -17,7 +17,10 @@ export function Logs() {
   const [q, setQ] = useState('');
   const [frozen, setFrozen] = useState<number | null>(null);
   const query = useDeferredValue(q.trim().toLowerCase());
-  const { events, loading } = useEvents(views.map((v) => v.botId), undefined, 300);
+  // Ask the server for the selected kinds: unfiltered, the newest 300 per bot are almost all
+  // orders and markouts, and the rare events (risk, status, edge) never show up.
+  const kindList = useMemo(() => [...kinds].sort(), [kinds]);
+  const { events, loading } = useEvents(views.map((v) => v.botId), kindList, 300);
 
   const rows = useMemo(() => {
     const out = events.filter((s) => kinds.has(s.e.k) && (frozen === null || s.e.ts <= frozen));
@@ -36,7 +39,7 @@ export function Logs() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Logs</h1>
+          <h1 className="text-xl font-bold tracking-tight">Logs</h1>
           <p className="text-sm text-muted">Eventos ao vivo de todos os bots: o que o motor decidiu e por quê.</p>
         </div>
         <Button onClick={() => setFrozen((f) => (f === null ? live.serverNow() : null))}>{frozen === null ? '❚❚ Congelar' : '▶ Ao vivo'}</Button>
@@ -49,7 +52,7 @@ export function Logs() {
           </button>
         ))}
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar…" aria-label="Buscar nos logs"
-          className="ml-auto w-full rounded-xl border border-line-strong bg-raised px-3 py-1.5 text-sm outline-none focus:border-brand sm:w-64" />
+          className="ml-auto w-full rounded-[8px] border border-line-strong bg-raised px-3 py-1.5 text-sm outline-none focus:border-brand sm:w-64" />
       </div>
       {live.eventsDropped > 0 && <Pill tone="warn">{live.eventsDropped} eventos ao vivo não couberam no feed. Recarregue para ver todos.</Pill>}
       <Card pad={false}>

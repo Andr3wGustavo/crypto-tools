@@ -3,7 +3,7 @@ import { EquityChart, PriceChart } from '../components/charts';
 import { Controls } from '../components/Controls';
 import { EventRow } from '../components/EventRow';
 import { BandBar } from './Overview';
-import { Card, Empty, KV, Link, Pill, Skeleton, StatusBadge, cx, toneOf } from '../components/ui';
+import { Card, Empty, KV, Link, PairIcon, Pill, Skeleton, StatusBadge, cx, toneOf, useMedia } from '../components/ui';
 import { aprOf, botHealth, pnlOf, touchSpreadBps } from '../lib/derive';
 import { fmtAge, fmtBps, fmtDuration, fmtInt, fmtPct, fmtPrice, fmtQty, fmtUsd, pairLabel } from '../lib/format';
 import { live, useEvents, useFills, useSeries, useServerNow, useView } from '../state';
@@ -47,6 +47,7 @@ export function BotDetail({ botId }: { botId: string }) {
   const { points, loading } = useSeries(botId);
   const { fills } = useFills([botId], 300);
   const { events } = useEvents([botId], ['status', 'risk', 'error', 'reconcile', 'command', 'edge', 'fill'], 100);
+  const wideChart = useMedia('(min-width: 1280px)'); // side by side with the book/inventory column
 
   if (!v) {
     return live.epoch === 0 ? <Skeleton className="h-96" /> : (
@@ -64,24 +65,26 @@ export function BotDetail({ botId }: { botId: string }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <Link href="/" className="text-muted hover:text-brand" title="Voltar">←</Link>
-          <h1 className="text-2xl font-bold tracking-tight">{pairLabel(v.symbol, v.base, v.quote)}</h1>
-          <Pill tone="brand">{v.mode.toUpperCase()}</Pill>
+          <PairIcon base={v.base} quote={v.quote} size={26} />
+          <h1 className="text-xl font-bold tracking-tight">{pairLabel(v.symbol, v.base, v.quote)}</h1>
+          <Pill>maker 0%</Pill>
+          <Pill tone="brand">{v.mode}</Pill>
           <StatusBadge status={v.status} quoting={v.quoting} stale={stale} />
           {v.market.toxic && <Pill tone="warn">fluxo tóxico</Pill>}
           {v.reduceOnly && <Pill tone="warn">reduce-only</Pill>}
         </div>
         <Controls v={v} />
       </div>
-      {h.reasons.length > 0 && <div className={cx('rounded-xl border px-3 py-2 text-sm', h.level === 'down' ? 'border-down/40 bg-down/10 text-down' : 'border-warn/30 bg-warn/10 text-warn')}>{h.reasons.join(' · ')}</div>}
+      {h.reasons.length > 0 && <div className={cx('rounded-[8px] border px-3 py-2 text-sm', h.level === 'down' ? 'border-down/40 bg-down/10 text-down' : 'border-warn/30 bg-warn/10 text-warn')}>{h.reasons.join(' · ')}</div>}
 
       <div className="grid gap-4 xl:grid-cols-[1fr_340px] xl:items-start">
         <Card title="Preço ao vivo" action={<span className="num text-xs text-faint">{fmtPrice(v.market.mid)} · {fills.length} fills no período</span>} pad={false}>
           <div className="px-2 pb-2">
-            {loading ? <Skeleton className="m-2 h-[320px]" /> : points.length < 2 ? <Empty title="Juntando pontos">Um ponto a cada 5 s. O gráfico aparece em instantes.</Empty> : <PriceChart points={points} fills={fills} />}
+            {loading ? <Skeleton className="m-2 h-[320px]" /> : points.length < 2 ? <Empty title="Juntando pontos">Um ponto a cada 5 s. O gráfico aparece em instantes.</Empty> : <PriceChart points={points} fills={fills} height={wideChart ? 466 : 320} />}
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-line px-4 py-2 text-[11px] text-faint">
             <span><span className="text-brand">━</span> mid MEXC</span><span>╌ mid Binance</span><span><span className="text-ink">━</span> justo</span>
-            <span><span className="text-up">┈</span> nossa compra</span><span><span className="text-down">┈</span> nossa venda</span><span><span className="text-up">▲</span>/<span className="text-down">▼</span> fills</span>
+            <span><span className="text-up">┈</span> nossa compra</span><span><span className="text-down">┈</span> nossa venda</span><span><span className="text-up">●</span>/<span className="text-down">●</span> fills (compra/venda)</span>
           </div>
         </Card>
         <div className="space-y-4">

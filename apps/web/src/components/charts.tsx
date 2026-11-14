@@ -6,7 +6,7 @@ import {
 import { useEffect, useMemo, useRef } from 'react';
 import { fmtPrice, fmtTime } from '../lib/format';
 
-const C = { bg: 'transparent', grid: 'rgba(255,255,255,0.04)', text: '#a1a1aa', line: '#26262b', brand: '#FFD60A', up: '#22C55E', down: '#EF4444', ref: '#71717a', fair: '#f4f4f5' };
+const C = { bg: 'transparent', grid: 'rgba(139,163,154,0.07)', text: '#8ba39a', line: '#142a31', brand: '#FFD60A', up: '#1FE07A', down: '#FF5468', ref: '#5d7972', fair: '#dfe8e3' };
 const sec = (ms: number) => Math.floor(ms / 1000) as UTCTimestamp;
 const hhmm = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', hour12: false });
 
@@ -18,7 +18,7 @@ function baseChart(el: HTMLElement, height: number): IChartApi {
     grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
     rightPriceScale: { borderColor: C.line },
     timeScale: { borderColor: C.line, timeVisible: true, secondsVisible: false, tickMarkFormatter: (t: Time) => hhmm.format((t as number) * 1000) },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: 'rgba(255,214,10,0.35)', labelBackgroundColor: '#1a1a1d' }, horzLine: { color: 'rgba(255,214,10,0.35)', labelBackgroundColor: '#1a1a1d' } },
+    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: 'rgba(255,214,10,0.35)', labelBackgroundColor: '#0d2129' }, horzLine: { color: 'rgba(255,214,10,0.35)', labelBackgroundColor: '#0d2129' } },
     localization: { timeFormatter: (t: Time) => fmtTime((t as number) * 1000), priceFormatter: (p: number) => fmtPrice(p) },
     handleScale: { axisPressedMouseMove: { time: true, price: false } },
   });
@@ -34,6 +34,9 @@ const PRICE_LINES: Line[] = [
 ];
 
 /** Live price: MEXC mid, Binance reference, fair value, our quote band and the fills. */
+/** Most recent fills drawn on the price chart. */
+const MAX_FILL_MARKERS = 300;
+
 export function PriceChart({ points, fills, height = 320 }: { points: SeriesPoint[]; fills: StoredEvent[]; height?: number }) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
@@ -61,15 +64,21 @@ export function PriceChart({ points, fills, height = 320 }: { points: SeriesPoin
     for (const l of PRICE_LINES) {
       const s = series.current.get(l.key);
       if (!s) continue;
-      const data: Array<{ time: UTCTimestamp; value: number }> = [];
+      // Our quotes come and go. The library joins points across whitespace, so the segment that
+      // would bridge minutes without an order is drawn transparent instead.
+      const gaps = l.key === 'quoteBid' || l.key === 'quoteAsk';
+      const data: Array<{ time: UTCTimestamp; value: number; color?: string }> = [];
       let last = -1;
+      let broken = false;
       for (const p of points) {
         const v = p[l.key];
         const t = sec(p.ts);
-        if (typeof v === 'number' && v > 0 && t > last) {
-          data.push({ time: t, value: v });
+        if (t <= last) continue;
+        if (typeof v === 'number' && v > 0) {
+          data.push(gaps && broken ? { time: t, value: v, color: 'rgba(0,0,0,0)' } : { time: t, value: v });
+          broken = false;
           last = t;
-        }
+        } else if (gaps && data.length > 0) broken = true;
       }
       s.setData(data);
     }
@@ -85,9 +94,10 @@ export function PriceChart({ points, fills, height = 320 }: { points: SeriesPoin
     for (const f of fills) {
       const e = f.e as Extract<BotEvent, { k: 'fill' }>;
       if (e.k !== 'fill' || e.ts < first) continue;
-      ms.push({ time: sec(e.ts), position: e.side === 'BUY' ? 'belowBar' : 'aboveBar', shape: e.side === 'BUY' ? 'arrowUp' : 'arrowDown', color: e.side === 'BUY' ? C.up : C.down, text: e.side === 'BUY' ? 'C' : 'V', size: 1 });
+      // A dot at the exact fill price (no text): hundreds of fills stay readable.
+      ms.push({ time: sec(e.ts), position: 'atPriceMiddle', price: e.price, shape: 'circle', color: e.side === 'BUY' ? C.up : C.down, size: 0.5 });
     }
-    return ms.sort((a, b) => (a.time as number) - (b.time as number));
+    return ms.sort((a, b) => (a.time as number) - (b.time as number)).slice(-MAX_FILL_MARKERS);
   }, [fills, points]);
 
   useEffect(() => {
@@ -166,10 +176,10 @@ export function Gauge({ value, threshold, label, size = 132 }: { value: number; 
   return (
     <figure className="flex flex-col items-center" aria-label={`${label}: ${(v * 100).toFixed(1)}%`}>
       <svg width={size} height={size / 2 + 14} viewBox={`0 0 ${size} ${size / 2 + 14}`}>
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke="#26262b" strokeWidth="10" strokeLinecap="round" />
+        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke="#142a31" strokeWidth="10" strokeLinecap="round" />
         {v > 0.001 && <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${ex} ${ey}`} fill="none" stroke={color} strokeWidth="10" strokeLinecap="round" />}
-        {tick && <line x1={tick[0]} y1={tick[1]} x2={cx + (tick[0] - cx) * 1.18} y2={cy + (tick[1] - cy) * 1.18} stroke="#f4f4f5" strokeWidth="2" />}
-        <text x={cx} y={cy - 6} textAnchor="middle" className="num" fill="#f4f4f5" fontSize="20" fontWeight="600">{(v * 100).toFixed(1)}%</text>
+        {tick && <line x1={tick[0]} y1={tick[1]} x2={cx + (tick[0] - cx) * 1.18} y2={cy + (tick[1] - cy) * 1.18} stroke="#dfe8e3" strokeWidth="2" />}
+        <text x={cx} y={cy - 6} textAnchor="middle" className="num" fill="#ffffff" fontSize="20" fontWeight="700">{(v * 100).toFixed(1)}%</text>
       </svg>
       <figcaption className="label -mt-1">{label}</figcaption>
     </figure>

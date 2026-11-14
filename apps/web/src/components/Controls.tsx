@@ -76,7 +76,7 @@ export function Controls({ v }: { v: BotView }) {
           <p className="text-sm text-muted">Esta ação pode aumentar o risco. Digite o código de 6 dígitos do seu app autenticador.</p>
           <input autoFocus inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} value={code}
             onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-            className="num mt-4 w-full rounded-xl border border-line-strong bg-bg px-4 py-3 text-center text-2xl tracking-[0.5em] outline-none focus:border-brand"
+            className="num mt-4 w-full rounded-[8px] border border-line-strong bg-bg px-4 py-3 text-center text-2xl tracking-[0.5em] outline-none focus:border-brand"
             aria-label="Código 2FA" />
           {err && <p role="alert" className="mt-3 text-sm text-down">{err}</p>}
           <div className="mt-4 flex justify-end gap-2">

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { sampleView } from '../../../api/src/testing/fixtures';
 import { aprOf, bandOf, botHealth, pnlOf, totalsOf, touchSpreadBps } from './derive';
 import { fmtAge, fmtBps, fmtPrice, fmtUsd, pairLabel, shortAddr, toCsv } from './format';
-import { LiveStore, MAX_EVENTS, WS_CLOSE_UNAUTHORIZED, backoffMs, mergePoints, wsUrl, type SocketLike } from './live';
+import { LiveStore, MAX_EVENTS, MAX_NOISY, WS_CLOSE_UNAUTHORIZED, backoffMs, mergePoints, wsUrl, type SocketLike } from './live';
 import { hrefOf, parseRoute } from './router';
 import { parseTokenBalance, solscanTx, usdtBalance } from './solana';
 import { findPhantom, signInError, signInWithPhantom, toBase64, type SolanaProvider } from './wallet';
@@ -188,6 +188,19 @@ describe('live store (WebSocket snapshot + deltas)', () => {
     h.sockets[0]!.onclose?.({ code: 1000 });
     expect(h.store.state).toBe('idle');
     expect(h.timers.length).toBe(0);
+  });
+
+  it('order and markout churn never evicts the rare events (risk, status, edge)', () => {
+    const { store } = liveHarness();
+    store.seedEvents([{ id: '1-0', botId: BOT, e: { k: 'risk', ts: 1, action: 'pause', violations: ['stale_ticker'] } }]);
+    const churn = Array.from({ length: MAX_EVENTS + 500 }, (_, i): StoredEvent => ({ id: `${i + 2}-0`, botId: BOT, e: { k: 'order', ts: i + 2, op: 'place', clientOrderId: `c${i}` } }));
+    store.seedEvents(churn);
+    expect(store.events.map((e) => e.e.k)).toEqual(['risk']);
+    expect(store.noisy.length).toBe(MAX_NOISY);
+    const all = store.eventsOf();
+    expect(all[0]!.id).toBe(`${MAX_EVENTS + 501}-0`); // merged, newest first
+    expect(all.at(-1)!.e.k).toBe('risk');
+    expect(store.eventsOf(new Set(['risk']))).toHaveLength(1);
   });
 
   it('a fill seen in both streams (different stream ids) is kept once, ordered by time', () => {

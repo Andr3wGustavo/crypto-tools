@@ -29,6 +29,8 @@
     "web:dev": "npm run dev -w @cortex/web",
     "web:build": "npm run build -w @cortex/web",
     "dev:dashboard": "tsx apps/api/src/dev/server.ts",
+    "demo": "npm run web:build && tsx apps/api/src/dev/server.ts --demo --ff 0.75",
+    "media": "tsx scripts/capture-media.ts",
     "e2e": "npm run web:build && playwright test -c apps/web/playwright.config.ts"
   },
   "devDependencies": {

@@ -37,7 +37,7 @@ export function Risk() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Centro de risco</h1>
+        <h1 className="text-xl font-bold tracking-tight">Centro de risco</h1>
         <p className="text-sm text-muted">Limites são aplicados pelo worker (fail-closed). Aqui você vê e age.</p>
       </div>
 

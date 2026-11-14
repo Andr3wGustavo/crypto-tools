@@ -67,14 +67,14 @@ export function Fills() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Fills</h1>
+          <h1 className="text-xl font-bold tracking-tight">Fills</h1>
           <p className="text-sm text-muted">Execuções simuladas (shadow), com o mesmo formato do live.</p>
         </div>
         <Button onClick={exportCsv} disabled={rows.length === 0}>⇩ CSV ({rows.length})</Button>
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <select value={bot} onChange={(e) => setBot(e.target.value)} aria-label="Bot"
-          className="rounded-xl border border-line-strong bg-raised px-3 py-1.5 text-sm outline-none focus:border-brand">
+          className="rounded-[8px] border border-line-strong bg-raised px-3 py-1.5 text-sm outline-none focus:border-brand">
           <option value="all">Todos os pares</option>
           {views.map((v) => <option key={v.botId} value={v.botId}>{v.base}/{v.quote}</option>)}
         </select>

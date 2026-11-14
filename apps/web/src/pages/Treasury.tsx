@@ -36,7 +36,7 @@ function Ladder({ current }: { current: number }) {
     <Card title="Escada de capital">
       <ol className="grid gap-3 md:grid-cols-4">
         {LADDER.map((d, i) => (
-          <li key={d.id} className={i === current ? 'glass glow p-4' : 'rounded-2xl border border-line p-4 opacity-70'}>
+          <li key={d.id} className={i === current ? 'glass glow p-4' : 'rounded-[10px] border border-line bg-bg p-4 opacity-70'}>
             <div className="flex items-center justify-between"><span className="num text-lg font-bold">{d.id}</span>{i === current && <Pill tone="brand">atual</Pill>}</div>
             <div className="mt-1 font-semibold">{d.label}</div>
             <div className="num mt-1 text-sm text-muted">{d.capital}</div>
@@ -53,7 +53,7 @@ function ShadowTreasury({ views }: { views: BotView[] }) {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Caixa e Tesouro</h1>
+        <h1 className="text-xl font-bold tracking-tight">Caixa e Tesouro</h1>
         <p className="text-sm text-muted">Fase atual: <strong className="text-brand">D0 · shadow</strong>. Nenhum dinheiro real está em jogo.</p>
       </div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -100,7 +100,7 @@ function LiveTreasury({ views }: { views: Array<BotView & { treasury: TreasuryVi
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Caixa e Tesouro</h1>
+        <h1 className="text-xl font-bold tracking-tight">Caixa e Tesouro</h1>
         <p className="text-sm text-muted">Fase atual: <strong className="text-brand">D1 · live</strong>. Metade do lucro confirmado vai para o tesouro, que nunca opera.</p>
       </div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
