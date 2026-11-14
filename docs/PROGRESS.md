@@ -44,7 +44,7 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
 - ✅ Fixed: MEXC clock sync used one sample that included the TLS handshake (offset 500–750 ms, RTT ≤ 937 ms); now min-RTT of 5 samples → offset ≈ 52 ms, RTT ≈ 300 ms. Without this the clock-skew rule would have paused the shadow for nothing
 - ✅ Fixed: Redis sink kept reconnecting and logging forever after a failed init; errors are now throttled to 1 log/min
 - ✅ **E3 proof — live kill -9 / restart, state bit-exact** (2026-11-11, MEXC SOLUSDT + Binance, bundled worker): process 1 ran 3.5 min, snapshots every 45 s, killed with `taskkill /F` 22 s after the last snapshot → process 2 restored `snap-…9889` + replayed the 2 090-record tail in 436 ms → state digest `a0b113fc…` = an independent genesis replay of the crashed segment (11 979 records) → ran 3 min live, drained → final digest `9d48738f1de5e5b8…` = full genesis replay of both segments (24 764 records, 82 places, 81 cancels) → a third boot restored with 0 records to replay. Equity matched (15 → 15; no fills in this window — 1-tick spread — so the fill path of the restart proof is covered by the synthetic kill/restart test, which has fills)
-- ⬜ Live reconciliation against the exchange (balances/open orders) — belongs to the live executor (E8)
+- ✅ Live reconciliation against the exchange (balances/open orders) — done in E8 (LiveEngine sync; see E8 below)
 
 ## E4 — Production VPS + 24/7 shadow → 58
 - ✅ **Pair scanner** (pulled forward from E7), pre-registered: pure gates/metrics/ranking in `packages/core/src/scanner` (9 tests incl. properties) + CLI `apps/worker/src/scan.ts`. Static gates (USDT, tradable, no ST flag, no leveraged tokens, maker 0 %, min notional fits the inventory cap, 24 h volume, Binance listing) → whole-market book sampled every 5 s → spread in ticks, capturable half spread after pennying, realised 1-min vol (Σr²/Σdt), recent trade rate, **reference basis check** (same ticker on Binance but a different token ⇒ rejected). The report's `paramsHash` pre-registers the selection
@@ -145,7 +145,8 @@ Legend: ✅ done (with evidence) · 🔄 in progress · ⬜ not started · ⏸ b
   - The API would not start with Redis down.
   - A relative `API_WEB_DIR` crashed the static server.
 - ⏸ **Proof per the plan**: live screenshots on the PC and the phone through Tailscale (needs the VPS, E4).
-- ⬜ Later (E7): Edge Lab, Simulator and Pair Scanner pages. Treasury on-chain (wallet balance, withdrawals with Solscan links) arrives with E9.
+- ✅ Treasury on-chain (wallet balance, withdrawals with Solscan links) — done in E9.
+- ⬜ Later (E7): Edge Lab, Simulator and Pair Scanner pages.
 
 ## AFK operations (pulled forward, before E7)
 Priority is now the unattended farm. E7 (the Edge Lab, Simulator and Scanner pages) is not on its critical path; the official GO/NO-GO evaluator already exists as a CLI.
@@ -156,7 +157,7 @@ Priority is now the unattended farm. E7 (the Edge Lab, Simulator and Scanner pag
   - **Reliability**: consumer group per bot stream (a restart resumes, at-least-once). The queue is bounded and batches 10 embeds per message, honours 429 `retry_after`, and never logs the webhook URL. Its own healthchecks ping means a dead alerter is noticed too.
   - **Evidence**: 9 unit tests + 1 real-Redis integration test (CI). Bundle smoke with Redis down: it logs and backs off, no crash.
   - **Bug caught by the tests**: drops that happened while a batch was in flight were lost from the "N dropped" notice.
-- ⬜ **E8 live execution** (next): MEXC user-data stream, a live executor with the simulator's contract, reconciliation against the exchange, crash recovery by clientOrderId, cancel-all on boot and shutdown. Still refused until the GO.
+- ✅ **E8 live execution**: built and tested, gated closed until the GO (see E8 below).
 
 ## E8 — Live execution (built, gated) → target 90
 
