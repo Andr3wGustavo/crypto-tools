@@ -27,6 +27,7 @@ await build({ ...common, entryPoints: ['apps/worker/src/withdraw-main.ts'], outf
 await build({ ...common, entryPoints: ['apps/worker/src/verify-run.ts'], outfile: 'dist/worker/verify-run.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/healthcheck.ts'], outfile: 'dist/worker/healthcheck.js' });
 await build({ ...common, entryPoints: ['apps/worker/src/evaluate.ts'], outfile: 'dist/worker/evaluate.js' });
+await build({ ...common, entryPoints: ['apps/worker/src/persist-backfill.ts'], outfile: 'dist/worker/persist-backfill.js' });
 // Operator API (separate image target `api`).
 await build({ ...common, entryPoints: ['apps/api/src/main.ts'], outfile: 'dist/api/main.js' });
 await build({ ...common, entryPoints: ['apps/api/src/provision.ts'], outfile: 'dist/api/provision.js' });

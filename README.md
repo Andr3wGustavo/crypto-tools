@@ -82,6 +82,14 @@ flowchart LR
 
 **Determinism.** The engine has no clock, no randomness and no network access of its own. It is a pure function of its inputs, and every input is recorded. A whole day can be replayed with a bit-identical result. Crash recovery, audits and the official GO/NO-GO evaluation all depend on this.
 
+**The database is a copy, never the source.** Every order, fill, ledger posting, treasury move and withdrawal is also written to Postgres, so you can query the books with SQL. Three rules make that copy exact:
+
+- Each flush is one database transaction, together with a cursor that says how far the run has been saved. A failed flush is rolled back and retried as a whole.
+- Every row has a key derived from the run and the record that produced it. Writing the same record twice changes nothing, so after a crash the worker simply re-sends what the database may have missed.
+- The database never gets ahead of the recording on disk. After a hard kill it holds exactly what a replay of the recording produces.
+
+If the database is ever lost or behind, `persist-backfill` rebuilds it from the recordings.
+
 | Part | What it does |
 |---|---|
 | `packages/core` | The pure engine: quoting math, the strategy state machine, simulator, ledger, risk rules and statistics |
@@ -233,6 +241,7 @@ docs/          design notes, runbook, progress log, media
 - **Over 300 automated tests.** They include unit tests, property tests (thousands of random cases), integration tests against fake exchanges, and dashboard tests in a real browser.
 - **Replay is bit-exact.** One real hour of MEXC SOL/USDT data (144,178 records) gives the same hash live and in replay.
 - **Crash recovery is bit-exact.** A live session was killed mid-run (`kill -9`) and restarted. After the restart, its state matched an uninterrupted run bit for bit.
+- **The database copy is exact.** Tests against a real TimescaleDB kill a flush half-way, crash a worker between flushes and re-send whole histories. Each time the database ends up identical to a clean run.
 - **The bot keeps quoting unattended (AFK liveness).** A test checks that the bot keeps placing orders for hours, across many simulated markets. This test caught real bugs. In one, a tiny leftover position, too small to sell and too large to add to, used to freeze the bot forever.
 - **CI runs on every push:**
   - type checks;

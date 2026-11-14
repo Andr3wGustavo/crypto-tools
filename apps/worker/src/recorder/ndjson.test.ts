@@ -40,6 +40,33 @@ describe('NdjsonRecorder crash safety', () => {
     await rec.close();
   });
 
+  it('durableCount never exceeds what a hard kill would leave readable, and reaches count on close', async () => {
+    const dir = tmp();
+    const rec = new NdjsonRecorder(dir, 'bot', { segment: 1, flushEveryMs: 1_000 });
+    let checks = 0;
+    for (let i = 0; i < 400; i++) {
+      // Hour rotation in the middle (durability must carry across files).
+      rec.write({ t: 'clock', ts: T0 + 3_000_000 + i * 1_000 });
+      if (i % 40 !== 39) continue;
+      await new Promise((r) => setTimeout(r, 15));
+      const durable = rec.durableCount;
+      expect(durable).toBeLessThanOrEqual(rec.count);
+      // "SIGKILL now": copy every file as it is on disk and read what survives.
+      const snap = tmp();
+      const copies = listRecordings(dir).map((f, k) => {
+        const c = path.join(snap, `${k}-${path.basename(f)}`);
+        fs.copyFileSync(f, c);
+        return c;
+      });
+      const survived = await readAll(copies, () => undefined);
+      expect(survived.length).toBeGreaterThanOrEqual(durable);
+      if (durable > 0) checks++;
+    }
+    expect(checks).toBeGreaterThan(5); // it really advances while running, not only at close
+    await rec.close();
+    expect(rec.durableCount).toBe(400);
+  });
+
   it('a restart writes a new segment instead of appending to a damaged file, and order is preserved', async () => {
     const dir = tmp();
     const a = new NdjsonRecorder(dir, 'bot', { segment: 1 });

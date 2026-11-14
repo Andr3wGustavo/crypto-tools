@@ -40,6 +40,10 @@ export class NdjsonRecorder {
   private lastFlushTs = Number.NEGATIVE_INFINITY;
   /** Rotated-out files still draining to disk: close() must wait for them too. */
   private closing = new Set<Promise<void>>();
+  /** Records whose bytes the OS already has (they survive a process kill). */
+  private durable = 0;
+  /** Durability bookkeeping of the current file (bytes handed to it / written by it). */
+  private io: FileIo | undefined;
   private readonly root: string;
   private readonly segment: string;
   private readonly floorKey: string;
@@ -66,12 +70,28 @@ export class NdjsonRecorder {
     this.lastSha = sha256(text);
     if (r.ts - this.lastFlushTs >= this.flushEveryMs) {
       this.lastFlushTs = r.ts;
-      this.stream!.flush(zlib.constants.Z_SYNC_FLUSH);
+      const records = this.written;
+      const io = this.io!;
+      this.stream!.flush(zlib.constants.Z_SYNC_FLUSH, () => {
+        // Everything the flush produced has been handed to the file by now (setImmediate runs
+        // after any 'data' still queued): once the file has written that many bytes, these
+        // records are decodable from disk even if the process dies.
+        setImmediate(() => io.mark(io.queued, records));
+      });
     }
   }
 
   get count(): number {
     return this.written;
+  }
+
+  /**
+   * Records (written by this process) that are already in the OS: a process kill cannot lose
+   * them. Lags `count` by up to one flush interval. Consumers that must never get ahead of the
+   * recording (the Postgres sink) stop here.
+   */
+  get durableCount(): number {
+    return this.durable;
   }
 
   /** Where the last record went; undefined before the first write. */
@@ -86,9 +106,20 @@ export class NdjsonRecorder {
     fs.mkdirSync(folder, { recursive: true });
     const name = `${hour}-${this.segment}.ndjson.gz`;
     // 'wx': fail loudly rather than ever append to / overwrite an existing segment.
-    this.file = fs.createWriteStream(path.join(folder, name), { flags: 'wx' });
-    this.stream = zlib.createGzip({ level: 6 });
-    this.stream.pipe(this.file);
+    const file = fs.createWriteStream(path.join(folder, name), { flags: 'wx' });
+    const stream = zlib.createGzip({ level: 6 });
+    const io = new FileIo((records) => (this.durable = Math.max(this.durable, records)));
+    // Manual pipe, so every chunk's write completion is known (see durableCount).
+    stream.on('data', (chunk: Buffer) => {
+      io.queued += chunk.length;
+      file.write(chunk, (err) => {
+        if (!err) io.wrote(chunk.length);
+      });
+    });
+    stream.once('end', () => file.end());
+    this.file = file;
+    this.stream = stream;
+    this.io = io;
     this.currentKey = key;
     this.currentRel = `${day}/${name}`;
     this.line = 0;
@@ -105,16 +136,46 @@ export class NdjsonRecorder {
 
   private finishCurrent(): void {
     const { stream, file } = this;
+    const records = this.written;
     this.stream = undefined;
     this.file = undefined;
+    this.io = undefined;
     if (!stream || !file) return;
     const done = new Promise<void>((res, rej) => {
-      file.once('close', () => res());
+      file.once('close', () => {
+        this.durable = Math.max(this.durable, records);
+        res();
+      });
       file.once('error', rej);
       stream.once('error', rej);
     }).finally(() => this.closing.delete(done));
     this.closing.add(done);
     stream.end();
+  }
+}
+
+/** Byte accounting of one recording file: which flush marks are already written by the OS. */
+class FileIo {
+  queued = 0;
+  private done = 0;
+  private marks: Array<{ bytes: number; records: number }> = [];
+
+  constructor(private readonly onDurable: (records: number) => void) {}
+
+  mark(bytes: number, records: number): void {
+    this.marks.push({ bytes, records });
+    this.settle();
+  }
+
+  wrote(n: number): void {
+    this.done += n;
+    this.settle();
+  }
+
+  private settle(): void {
+    let last = -1;
+    while (this.marks.length > 0 && this.marks[0]!.bytes <= this.done) last = this.marks.shift()!.records;
+    if (last >= 0) this.onDurable(last);
   }
 }
 

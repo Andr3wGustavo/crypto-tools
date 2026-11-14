@@ -13,10 +13,11 @@ import { CommandSource } from './ops/command-source';
 import { heartbeatFile, writeHeartbeat } from './ops/heartbeat';
 import { IoRedisStreamClient } from './ops/redis-stream-client';
 import { NdjsonRecorder } from './recorder/ndjson';
-import { PostgresSink } from './sinks/postgres-sink';
+import { persistReplay } from './sinks/persistence';
+import { PostgresSink, type LedgerTap } from './sinks/postgres-sink';
 import { IoRedisLive, RedisSink } from './sinks/redis-sink';
 import { SnapshotStore, bootEngine } from './state/boot';
-import { shadowStrategyConfig } from './strategy-config';
+import { shadowStrategyConfig, withRunSalt } from './strategy-config';
 
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== '' ? Number(v) : d);
 
@@ -50,8 +51,10 @@ async function main(): Promise<void> {
   log.info({ rules: info.rules, makerFeeRate: info.makerFeeRate, takerFeeRate: info.takerFeeRate }, 'MEXC symbol rules');
 
   const botId = `mexc:${info.symbol}:shadow`;
-  const config = shadowStrategyConfig(botId, info, cfg.SHADOW_START_QUOTE);
-  const engineOpts: ShadowEngineOptions = { config, startQuote: cfg.SHADOW_START_QUOTE, latencyMs: cfg.SHADOW_LATENCY_MS, makerFeeRate: info.makerFeeRate };
+  const engineOpts: ShadowEngineOptions = withRunSalt({
+    config: shadowStrategyConfig(botId, info, cfg.SHADOW_START_QUOTE), startQuote: cfg.SHADOW_START_QUOTE, latencyMs: cfg.SHADOW_LATENCY_MS, makerFeeRate: info.makerFeeRate,
+  }, engineConfigHash);
+  const config = engineOpts.config;
   const configHash = engineConfigHash(engineOpts);
   const runId = `cfg-${configHash.slice(0, 12)}`;
   const runParent = path.join(cfg.MARKET_DATA_DIR, `mexc-${info.symbol}`);
@@ -63,10 +66,27 @@ async function main(): Promise<void> {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
   }
 
+  // ---- Postgres (optional): opened before the boot so the replay can re-send what it missed
+  // Postgres never gets ahead of the durable recording (see PostgresSink). During the boot
+  // replay every record comes from disk; afterwards: boot seq + what the recorder made durable.
+  let durableSeq: () => number = () => Number.POSITIVE_INFINITY;
+  let pg: PostgresSink | undefined;
+  let tap: LedgerTap | undefined;
+  if (cfg.PERSIST_ENABLED && cfg.DATABASE_URL) {
+    const sink = new PostgresSink({ botId, run: runId, mode: 'shadow', venue: 'mexc', symbol: info.symbol, base: config.base, quote: config.quote }, log, undefined, { durableSeq: () => durableSeq() });
+    try {
+      const cursor = await sink.init(config);
+      pg = sink;
+      log.info({ persistedSeq: cursor }, 'Postgres persistence enabled');
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'Postgres unavailable: file recording only (persist-backfill can fill the database later)');
+    }
+  }
+
   // ---- boot restore: newest valid snapshot + replay of everything recorded after it
   const store = new SnapshotStore(path.join(root, 'state'));
   const bootStart = Date.now();
-  const boot = await bootEngine(engineOpts, root, store);
+  const boot = await bootEngine(engineOpts, root, store, pg ? persistReplay(pg, log, (t) => (tap = t)) : undefined);
   const engine = boot.engine;
   const bootSnap = engine.snapshot();
   log.info({
@@ -77,23 +97,10 @@ async function main(): Promise<void> {
 
   // Created after boot: it starts a new segment that sorts after every existing file.
   const recorder = new NdjsonRecorder(runParent, runId);
+  const bootSeq = engine.recordCount;
+  durableSeq = () => bootSeq + recorder.durableCount;
 
-  let pg: PostgresSink | undefined;
-  if (cfg.PERSIST_ENABLED && cfg.DATABASE_URL) {
-    const sink = new PostgresSink(
-      botId, info.symbol, 'shadow',
-      () => ({ ...engine.edge.state, prior: engine.edge.prior }),
-      (id) => engine.ledger.transactions.find((t) => t.id === id),
-      log,
-    );
-    try {
-      await sink.init('mexc', info.symbol, config);
-      pg = sink;
-      log.info('Postgres persistence enabled');
-    } catch (err) {
-      log.warn({ err: (err as Error).message }, 'Postgres unavailable — continuing with file recording only');
-    }
-  }
+  pg?.start();
   // Dashboard view (read-only mapping of engine state to the @cortex/shared contracts).
   const viewer = new BotViewBuilder({ botId, mode: 'shadow', symbol: info.symbol, base: config.base, quote: config.quote, run: runId, version, startedAt });
   let redisConn: IoRedisLive | undefined;
@@ -149,7 +156,7 @@ async function main(): Promise<void> {
       return;
     }
     for (const o of outs) outputHash.update(JSON.stringify(o));
-    pg?.push(outs);
+    if (pg && tap) pg.push(tap.item(outs));
     viewer.observe(r, outs);
     redis?.push(toWireEvents(outs), r.ts, () => viewer.view(engine, { mexcAgeMs: mexc.lastMessageAgeMs(), binanceAgeMs: binance.lastMessageAgeMs() }), (v) => viewer.point(v));
     notable(outs);

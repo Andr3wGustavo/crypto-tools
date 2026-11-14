@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import 'dotenv/config';
+import { disconnectPrisma } from '@cortex/db';
 import { BinanceMarketStream, MexcMarketStream, MexcRest, MexcUserStream } from '@cortex/exchange';
 import Redis from 'ioredis';
 import { z } from 'zod';
@@ -15,9 +16,11 @@ import { CommandSource } from './ops/command-source';
 import { heartbeatFile, writeHeartbeat } from './ops/heartbeat';
 import { IoRedisStreamClient } from './ops/redis-stream-client';
 import { NdjsonRecorder } from './recorder/ndjson';
+import { persistReplay } from './sinks/persistence';
+import { PostgresSink, type LedgerTap } from './sinks/postgres-sink';
 import { IoRedisLive, RedisSink } from './sinks/redis-sink';
 import { SnapshotStore, bootAny } from './state/boot';
-import { shadowStrategyConfig } from './strategy-config';
+import { shadowStrategyConfig, withRunSalt } from './strategy-config';
 import {
   WITHDRAW_EVT_STREAM, WITHDRAW_REQ_STREAM, WITHDRAW_STREAM_MAX, WithdrawReportMsgSchema, decodeMessage, encodeMessage, validChannelSecret,
   type WithdrawRequestMsg,
@@ -32,6 +35,9 @@ const env = z.object({
   LIVE_DATA_DIR: z.string().default('./data/live'),
   LIVE_PAPER_OFFSET_BPS: z.coerce.number().min(0).max(5_000).default(0),
   REDIS_URL: z.string().optional(),
+  /** The live database (farm_live): fills, orders, ledger, treasury and withdrawals. Optional. */
+  DATABASE_URL: z.string().optional(),
+  PERSIST_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   /** Treasury withdrawals (E9): plan floor US$20, daily cap ≤ 1000. Part of the configuration. */
   LIVE_WITHDRAW_MIN: z.coerce.number().min(WITHDRAW_MIN_FLOOR).default(WITHDRAW_MIN_FLOOR),
   LIVE_WITHDRAW_DAILY_CAP: z.coerce.number().min(WITHDRAW_MIN_FLOOR).max(WITHDRAW_DAILY_CAP_CEILING).default(100),
@@ -67,11 +73,11 @@ async function main(): Promise<void> {
   if (!info.tradable) throw new Error(`${info.symbol} is not tradable on MEXC`);
 
   const botId = `mexc:${info.symbol}:live`;
-  const engineOpts: LiveEngineOptions = {
+  const engineOpts: LiveEngineOptions = withRunSalt({
     config: shadowStrategyConfig(botId, info, gate.capitalQuote), capitalQuote: gate.capitalQuote,
     // Always on: without a running withdrawer a request just waits, then is aborted as stale.
     treasury: { withdraw: { minAmount: e.LIVE_WITHDRAW_MIN, dailyCap: Math.max(e.LIVE_WITHDRAW_MIN, e.LIVE_WITHDRAW_DAILY_CAP) } },
-  };
+  }, liveConfigHash);
   const hash = liveConfigHash(engineOpts);
   const runId = `live-${hash.slice(0, 12)}`;
   const runParent = path.join(e.LIVE_DATA_DIR, `mexc-${info.symbol}`);
@@ -79,20 +85,43 @@ async function main(): Promise<void> {
   fs.mkdirSync(root, { recursive: true });
   const metaPath = path.join(root, 'meta.json');
   if (!fs.existsSync(metaPath)) {
-    fs.writeFileSync(metaPath, JSON.stringify({ botId, mode: 'live', info, config: engineOpts.config, capitalQuote: gate.capitalQuote, configHash: hash, ack: gate.ack, report: report?.protocolHash, createdAt: new Date().toISOString() }, null, 2));
+    fs.writeFileSync(metaPath, JSON.stringify({ botId, mode: 'live', info, config: engineOpts.config, capitalQuote: gate.capitalQuote, treasury: engineOpts.treasury, configHash: hash, ack: gate.ack, report: report?.protocolHash, createdAt: new Date().toISOString() }, null, 2));
   }
   log.warn({ symbol: info.symbol, capital: gate.capitalQuote, run: runId, ack: gate.ack, paperOffsetBps: e.LIVE_PAPER_OFFSET_BPS, version }, e.LIVE_PAPER_OFFSET_BPS > 0
     ? 'Cortex Farm LIVE starting in PAPER mode (real orders, priced far from the market)'
     : 'Cortex Farm LIVE starting: REAL ORDERS');
 
+  // ---- Postgres (farm_live, optional): a durable, queryable copy of the books. Never on the
+  // trading path: the engine does not wait for it, and its failures do not stop trading.
+  // The treasury wallet is shown on the dashboard only (this process never sends money).
+  const wallet = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(process.env.WITHDRAW_ADDRESS ?? '') ? process.env.WITHDRAW_ADDRESS! : null;
+  // Postgres never gets ahead of the durable recording (see PostgresSink). During the boot
+  // replay every record comes from disk; afterwards: boot seq + what the recorder made durable.
+  let durableSeq: () => number = () => Number.POSITIVE_INFINITY;
+  let pg: PostgresSink | undefined;
+  let tap: LedgerTap | undefined;
+  if (e.PERSIST_ENABLED && e.DATABASE_URL) {
+    const sink = new PostgresSink({ botId, run: runId, mode: 'live', venue: 'mexc', symbol: info.symbol, base: info.base, quote: info.quote, wallet }, log, undefined, { durableSeq: () => durableSeq() });
+    try {
+      const cursor = await sink.init(engineOpts.config);
+      pg = sink;
+      log.info({ persistedSeq: cursor }, 'Postgres persistence enabled (live)');
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'Postgres unavailable: the recording stays the source of truth (persist-backfill can fill the database later)');
+    }
+  }
+
   // ---- boot: newest valid snapshot + tail, else genesis replay of the live recording
   const store = new SnapshotStore(path.join(root, 'state'));
   const boot = await bootAny<LiveEngine, LiveInputRecord>({
     configHash: hash, stateVersion: LIVE_STATE_VERSION, create: () => new LiveEngine(engineOpts), restore: (s) => LiveEngine.restore(engineOpts, s),
-  }, root, store);
+  }, root, store, pg ? persistReplay(pg, log, (t) => (tap = t)) : undefined);
   const engine = boot.engine;
   log.info({ from: boot.from, snapshot: boot.snapshot, replayed: boot.replayed, rejected: boot.rejected, fills: engine.fillCount, opened: engine.isOpened }, 'live engine booted');
   const recorder = new NdjsonRecorder(runParent, runId);
+  const bootSeq = engine.recordCount;
+  durableSeq = () => bootSeq + recorder.durableCount;
+  pg?.start();
 
   // ---- withdrawal channel (E9): signed requests out, signed reports in (see withdraw/channel.ts)
   const channelSecret = e.WITHDRAW_CHANNEL_SECRET;
@@ -115,8 +144,6 @@ async function main(): Promise<void> {
   };
 
   // ---- sinks: dashboard view (Redis) + logs
-  // The treasury wallet is shown on the dashboard only (this process never sends money).
-  const wallet = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(process.env.WITHDRAW_ADDRESS ?? '') ? process.env.WITHDRAW_ADDRESS! : null;
   const viewer = new BotViewBuilder({ botId, mode: 'live', symbol: info.symbol, base: info.base, quote: info.quote, run: runId, version, startedAt, treasuryWallet: wallet });
   let redisConn: IoRedisLive | undefined;
   let redis: RedisSink | undefined;
@@ -159,6 +186,7 @@ async function main(): Promise<void> {
     engine, rest, symbol: info.symbol,
     record: (r) => recorder.write(r),
     onOutputs: (r, outs) => {
+      if (pg && tap) pg.push(tap.item(outs));
       viewer.observe(r, outs);
       redis?.push(toWireEvents(outs), r.ts, () => viewer.view(engine, { mexcAgeMs: mexc?.lastMessageAgeMs() ?? null, binanceAgeMs: binance?.lastMessageAgeMs() ?? null }), (v) => viewer.point(v));
       notable(outs);
@@ -287,6 +315,8 @@ async function main(): Promise<void> {
     try { saveSnapshot(); } catch (err) { log.error({ err }, 'final snapshot failed (next boot replays from the previous one)'); }
     const s = engine.strategy.snapshot();
     log.warn({ run: runId, records: engine.recordCount, fills: engine.fillCount, startEquity: s.startEquity, endEquity: s.equity, hold: engine.venueHold }, 'live session summary');
+    if (pg && !(await pg.close())) log.error({ persistedSeq: pg.persistedSeq }, 'Postgres did not take the last records (the next boot re-sends them)');
+    await disconnectPrisma().catch(() => undefined);
     await redis?.flush();
     await redisConn?.close();
     process.exit(code);

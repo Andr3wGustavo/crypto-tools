@@ -158,10 +158,12 @@ Regra para migrations: só **aditivas** (expand/contract). Assim o rollback de c
 | Reiniciar um par | `docker restart cortex-worker-dotusdt` (drain + restore exato) |
 | Replay / verificação | `docker run --rm -v /srv/cortex/data:/data:ro ghcr.io/andr3wgustavo/cortex-worker:<tag> node dist/verify-run.js /data/market/mexc-DOTUSDT/cfg-<hash12>` |
 | Histórico de deploys | `cat /srv/cortex/deploy/history` |
+| Consultar o banco | `docker exec -it cortex-postgres psql -U cortex -d farm_live` (ou `farm_shadow`); ex.: `SELECT * FROM "Fill" ORDER BY ts DESC LIMIT 20;` |
+| Reconstruir o Postgres a partir das gravações | `set -a; . /srv/cortex/cortex.env; set +a; docker run --rm --network cortex-farm_default -v /srv/cortex/data:/data:ro -e DATABASE_URL="postgresql://cortex:$POSTGRES_PASSWORD@postgres:5432/farm_shadow" ghcr.io/andr3wgustavo/cortex-worker:<tag> node dist/persist-backfill.js /data/market/mexc-DOTUSDT/cfg-<hash12>` — live: `farm_live` e `/data/live/mexc-<PAR>/live-<hash12>`. Idempotente: só adiciona o que falta; pode rodar com o worker ligado. Use quando o log disser `Postgres misses records` ou `queue overflow`. |
 
 ## 6. Testes obrigatórios da E4
 
-1. **Restauração de backup**: `infra/prod/scripts/restore-test.sh` → baixa o backup cifrado, roda `verify-run` em cada run (genesis = snapshot + cauda) e restaura o dump do Postgres num container descartável. Tem que terminar com `RESTORE TEST PASSED`.
+1. **Restauração de backup**: `infra/prod/scripts/restore-test.sh` → baixa o backup cifrado, roda `verify-run` em cada run (genesis = snapshot + cauda) e restaura o dump mais novo de cada banco (`farm_shadow`, `farm_live`) num container descartável. Tem que terminar com `RESTORE TEST PASSED`.
 2. **Rollback**: dispare o deploy de uma tag cujo worker não fica saudável (ex.: uma build com `HEARTBEAT_EVERY_MS=600000`) → o script tem que voltar à tag anterior sozinho, com os workers saudáveis.
 3. **Caos**: `docker kill -s KILL cortex-worker-<par>` → o restart restaura do snapshot (logs: `engine restored`), e o digest bate com o `verify-run`. Reinicie o VPS (`sudo reboot`) → tudo volta sozinho (`restart: unless-stopped`). Corte a rede de um container (`docker network disconnect`) → o dead-man acusa em ≤ 5 min.
 4. **24 h sem intervenção**: o healthchecks.io sem nenhum alerta por 24 h, com os N pares gravando.

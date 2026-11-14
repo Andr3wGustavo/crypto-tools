@@ -46,12 +46,16 @@ services:
       driver: json-file
       options: { max-size: 10m, max-file: "3" }
 
-  # One-shot schema migration, run by deploy.sh before the workers start (profile: not started by `up`).
+  # One-shot schema migration of BOTH databases (same schema: farm_shadow, farm_live), run by
+  # deploy.sh before the workers start (profile: not started by `up`).
   migrate:
     image: ghcr.io/andr3wgustavo/cortex-migrate:${IMAGE_TAG:?set IMAGE_TAG}
     profiles: ["migrate"]
     environment:
-      DATABASE_URL: postgresql://cortex:${POSTGRES_PASSWORD}@postgres:5432/farm_shadow
+      PG_BASE: postgresql://cortex:${POSTGRES_PASSWORD}@postgres:5432
+    entrypoint: ["sh", "-c"]
+    command:
+      - for db in farm_shadow farm_live; do echo "migrating $$db"; DATABASE_URL="$$PG_BASE/$$db" node node_modules/prisma/build/index.js migrate deploy --schema packages/db/prisma/schema.prisma || exit 1; done
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -119,9 +123,12 @@ services:
     stop_grace_period: 30s # the drain cancels every order before exiting
     depends_on:
       redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
     environment:
       TRADING_MODE: live
       REDIS_URL: redis://redis:6379
+      # Books, fills, treasury and withdrawals (never on the trading path; see postgres-sink.ts).
+      DATABASE_URL: postgresql://cortex:${POSTGRES_PASSWORD}@postgres:5432/farm_live?connection_limit=2
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LIVE_DATA_DIR: /data/live
       HEARTBEAT_DIR: /data/health

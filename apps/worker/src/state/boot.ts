@@ -79,11 +79,11 @@ export interface BootResult<E = ShadowEngine> {
  * is rebuilt from genesis (the recordings are the source of truth; snapshots only save time).
  * Because the engine is deterministic, the result equals one uninterrupted run over the same records.
  */
-export function bootEngine(opts: ShadowEngineOptions, root: string, store: SnapshotStore): Promise<BootResult> {
+export function bootEngine(opts: ShadowEngineOptions, root: string, store: SnapshotStore, hooks?: BootHooks<ShadowEngine, InputRecord>): Promise<BootResult> {
   return bootAny<ShadowEngine, InputRecord>({
     configHash: engineConfigHash(opts), stateVersion: ENGINE_STATE_VERSION,
     create: () => new ShadowEngine(opts), restore: (s) => ShadowEngine.restore(opts, s),
-  }, root, store);
+  }, root, store, hooks);
 }
 
 /** How to build, restore and identify one kind of engine (shadow or live). */
@@ -96,8 +96,22 @@ export interface EngineKind<E extends { process(r: R): unknown }, R> {
   readonly record?: R;
 }
 
+/**
+ * Observers of the boot replay (e.g. persistence re-sending what the database may have missed).
+ * `onStart` sees the engine right before its first replayed record; `onRecord` sees every replayed
+ * record with its outputs, and may return a promise to apply backpressure.
+ */
+export interface BootHooks<E extends { process(r: R): unknown }, R> {
+  onStart?(engine: E): void;
+  onRecord?(engine: E, r: R, outs: ReturnType<E['process']>): void | Promise<void>;
+}
+
 /** Same algorithm for every engine kind: newest valid snapshot + tail, else genesis replay. */
-export async function bootAny<E extends { process(r: R): unknown }, R>(kind: EngineKind<E, R>, root: string, store: SnapshotStore): Promise<BootResult<E>> {
+export async function bootAny<E extends { process(r: R): unknown }, R>(kind: EngineKind<E, R>, root: string, store: SnapshotStore, hooks: BootHooks<E, R> = {}): Promise<BootResult<E>> {
+  const step = (engine: E, r: R): void | Promise<void> => {
+    const outs = engine.process(r) as ReturnType<E['process']>;
+    return hooks.onRecord?.(engine, r, outs);
+  };
   const files = listRecordings(root);
   const hash = kind.configHash;
   const rejected: string[] = [];
@@ -149,9 +163,11 @@ export async function bootAny<E extends { process(r: R): unknown }, R>(kind: Eng
           break;
         }
         verified = true;
+        hooks.onStart?.(engine);
         continue;
       }
-      engine.process(JSON.parse(l.text) as R);
+      const p = step(engine, JSON.parse(l.text) as R);
+      if (p) await p;
       replayed++;
     }
     if (!verified) {
@@ -162,9 +178,11 @@ export async function bootAny<E extends { process(r: R): unknown }, R>(kind: Eng
   }
 
   const engine = kind.create();
+  hooks.onStart?.(engine);
   let replayed = 0;
   for await (const l of readNdjsonLines(files, onTruncated)) {
-    engine.process(JSON.parse(l.text) as R);
+    const p = step(engine, JSON.parse(l.text) as R);
+    if (p) await p;
     replayed++;
   }
   return { engine, from: 'genesis', replayed, rejected, truncated };

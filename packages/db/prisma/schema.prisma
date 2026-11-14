@@ -92,8 +92,11 @@ model Event {
   type    String
   version Int         @default(1)
   payload Json
+  /// Deterministic `<run>:<record seq>:<output index>`: re-persisting a replayed record is a no-op.
+  key     String?
 
   @@id([id, ts])
+  @@unique([key, ts])
   @@index([botId, ts])
   @@index([type, ts])
   @@map("events")
@@ -164,11 +167,14 @@ model LedgerTx {
 model LedgerEntry {
   id      BigInt   @id @default(autoincrement())
   txId    String
+  /// Position of the posting inside its transaction (makes re-persisting idempotent).
+  idx     Int
   account String // cash:USDT | cash:SOL | treasury:USDT | trading:USDT | expense:fees:USDT | equity:capital:USDT | external:USDT
   asset   String
   amount  Decimal  @db.Decimal(38, 18) // signed
   tx      LedgerTx @relation(fields: [txId], references: [id])
 
+  @@unique([txId, idx])
   @@index([account])
   @@index([txId])
 }
@@ -276,8 +282,9 @@ model Withdrawal {
   botId      String
   status     WithdrawalStatus
   asset      String
-  network    String
-  address    String
+  /// Known to the withdrawer only (the trading process never holds it); null when unknown.
+  network    String?
+  address    String?
   amount     Decimal          @db.Decimal(38, 18)
   fee        Decimal?         @db.Decimal(38, 18)
   exchangeId String?
@@ -287,6 +294,17 @@ model Withdrawal {
   updatedAt  DateTime         @updatedAt @db.Timestamptz(3)
 
   @@index([botId, createdAt])
+}
+
+/// How far a bot run's outputs are durably in Postgres (record sequence number of the engine).
+/// Written in the same transaction as the rows, so a restart re-persists exactly the missing tail.
+model PersistCursor {
+  botId     String
+  run       String
+  seq       BigInt
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@id([botId, run])
 }
 
 model AuditLog {
