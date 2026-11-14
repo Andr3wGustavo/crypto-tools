@@ -40,7 +40,8 @@ function Shell() {
   }, [signedIn]);
 
   useEffect(() => onUnauthorized(() => {
-    setExpired(true);
+    // Only a session that existed can expire: the first visit's /auth/me probe is a 401 too.
+    if (qc.getQueryData(['me']) !== undefined) setExpired(true);
     live.reset();
     qc.setQueryData(['me'], undefined);
     void qc.invalidateQueries({ queryKey: ['me'] });

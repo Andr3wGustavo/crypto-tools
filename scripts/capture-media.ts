@@ -50,19 +50,16 @@ async function signIn(page: Page, pauseMs = 0) {
 
 /** Smooth scroll so the recording reads like a person looking at the page. */
 async function glide(page: Page, to: number, ms = 1_600) {
-  await page.evaluate(async ([y, d]) => {
-    const from = window.scrollY;
-    const t0 = performance.now();
-    await new Promise<void>((done) => {
-      const step = (t: number) => {
-        const k = Math.min(1, (t - t0) / d);
-        window.scrollTo(0, from + (y - from) * (k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2));
-        if (k < 1) requestAnimationFrame(step);
-        else done();
-      };
-      requestAnimationFrame(step);
-    });
-  }, [to, ms] as const);
+  // A string, not a function: tsx's helpers (__name) do not exist in the page.
+  await page.evaluate(`new Promise((done) => {
+    const from = window.scrollY, y = ${to}, d = ${ms}, t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / d);
+      window.scrollTo(0, from + (y - from) * (k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2));
+      if (k < 1) requestAnimationFrame(step); else done();
+    };
+    requestAnimationFrame(step);
+  })`);
 }
 
 async function screenshots(browser: Browser) {
@@ -80,6 +77,7 @@ async function screenshots(browser: Browser) {
   await page.screenshot({ path: path.join(OUT, 'overview.png') });
   await page.locator('a[href^="/bot/"]').first().click();
   await page.getByText('Preço ao vivo').waitFor();
+  await page.getByText('Juntando pontos').waitFor({ state: 'detached', timeout: 30_000 });
   await page.waitForTimeout(2_000);
   await page.screenshot({ path: path.join(OUT, 'bot.png') });
   await page.screenshot({ path: path.join(OUT, 'bot-full.png'), fullPage: true });
@@ -108,11 +106,13 @@ async function video(browser: Browser) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, recordVideo: { dir, size: { width: 1280, height: 800 } } });
   const page = await ctx.newPage();
   await signIn(page, 1_800);
+  await page.locator('a[href^="/bot/"]').first().waitFor();
   await page.waitForTimeout(3_500);
   await page.locator('a[href^="/bot/"]').first().hover();
   await page.waitForTimeout(800);
   await page.locator('a[href^="/bot/"]').first().click();
   await page.getByText('Preço ao vivo').waitFor();
+  await page.getByText('Juntando pontos').waitFor({ state: 'detached', timeout: 30_000 }); // the chart, not its loading state
   await page.waitForTimeout(4_000);
   await glide(page, 700);
   await page.waitForTimeout(2_000);
@@ -122,9 +122,11 @@ async function video(browser: Browser) {
   await page.getByRole('button', { name: 'Pausar' }).click();
   await page.locator('main').getByText('Pausado', { exact: true }).first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(2_000);
-  for (const href of ['/risk', '/fills', '/treasury', '/']) {
+  for (const [href, ready] of [['/risk', 'Centro de risco'], ['/fills', 'Fills'], ['/treasury', 'Caixa e Tesouro'], ['/', 'Visão geral']] as const) {
     await page.goto(BASE + href);
-    await page.waitForTimeout(2_600);
+    await page.getByRole('heading', { name: ready, exact: true }).waitFor();
+    await page.locator('header[data-conn="live"]').waitFor();
+    await page.waitForTimeout(href === '/fills' ? 3_400 : 2_600); // fills load from REST
   }
   const v = page.video();
   await ctx.close();
@@ -143,8 +145,9 @@ function convert() {
   }
   ff(['-i', webm, '-c:v', 'libx264', '-preset', 'slow', '-crf', '26', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', path.join(OUT, 'tour.mp4')]);
   const palette = path.join(OUT, '.palette.png');
-  const scale = 'fps=8,scale=860:-1:flags=lanczos';
-  ff(['-i', webm, '-vf', `${scale},palettegen=max_colors=96:stats_mode=diff`, palette]);
+  // Kept under ~6 MB: GitHub stops rendering README images around 10 MB.
+  const scale = 'fps=6,scale=760:-1:flags=lanczos';
+  ff(['-i', webm, '-vf', `${scale},palettegen=max_colors=64:stats_mode=diff`, palette]);
   ff(['-i', webm, '-i', palette, '-lavfi', `${scale}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle`, path.join(OUT, 'tour.gif')]);
   fs.rmSync(palette, { force: true });
   fs.rmSync(webm, { force: true });

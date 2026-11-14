@@ -224,11 +224,13 @@ export function Overview() {
         </div>
         <Pill tone="neutral"><span className="text-ink">{views.length}</span> bots · MEXC</Pill>
       </div>
-      <Banner tone={demo ? 'warn' : 'info'}>
-        {demo
-          ? 'Demonstração: mercado sintético semeado. Nenhum número desta tela é resultado real.'
-          : 'Shadow: dados reais da MEXC, ordens simuladas de forma conservadora. Nenhuma ordem real é enviada.'}
-      </Banner>
+      {!loading && (
+        <Banner tone={demo ? 'warn' : 'info'}>
+          {demo
+            ? 'Demonstração: mercado sintético semeado. Nenhum número desta tela é resultado real.'
+            : 'Shadow: dados reais da MEXC, ordens simuladas de forma conservadora. Nenhuma ordem real é enviada.'}
+        </Banner>
+      )}
 
       {alerts.length > 0 && (
         <div className="rounded-[10px] border border-down/40 bg-down/10 p-3 text-sm text-down" role="alert">

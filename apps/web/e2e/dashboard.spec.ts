@@ -69,6 +69,7 @@ test('without a wallet: the sign-in page explains how to get one, and the data s
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Console do operador' })).toBeVisible();
   await expect(page.getByText('Phantom não encontrada.')).toBeVisible({ timeout: 6_000 });
+  await expect(page.getByText('Sua sessão expirou')).toHaveCount(0); // a first visit is not an expiry
   await shot(page, '00-login');
   expect((await request.get('/bots')).status()).toBe(401);
   expect(errors).toEqual([]);

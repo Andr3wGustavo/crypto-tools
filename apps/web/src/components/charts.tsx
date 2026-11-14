@@ -64,22 +64,22 @@ export function PriceChart({ points, fills, height = 320 }: { points: SeriesPoin
     for (const l of PRICE_LINES) {
       const s = series.current.get(l.key);
       if (!s) continue;
-      // Our quotes come and go. The library joins points across whitespace, so the segment that
-      // would bridge minutes without an order is drawn transparent instead.
+      // Our quotes come and go. The library joins points across whitespace, and a segment takes
+      // the color of the point it STARTS from: the last point before a gap is made transparent so
+      // no line bridges the minutes without an order.
       const gaps = l.key === 'quoteBid' || l.key === 'quoteAsk';
       const data: Array<{ time: UTCTimestamp; value: number; color?: string }> = [];
       let last = -1;
-      let broken = false;
       for (const p of points) {
         const v = p[l.key];
         const t = sec(p.ts);
         if (t <= last) continue;
-        if (typeof v === 'number' && v > 0) {
-          data.push(gaps && broken ? { time: t, value: v, color: 'rgba(0,0,0,0)' } : { time: t, value: v });
-          broken = false;
-          last = t;
-        } else if (gaps && data.length > 0) broken = true;
+        last = t;
+        if (typeof v === 'number' && v > 0) data.push({ time: t, value: v });
+        else if (gaps && data.length > 0) data[data.length - 1]!.color = 'rgba(0,0,0,0)';
       }
+      // The final point starts no segment; keeping its color keeps the axis label readable.
+      if (data.length > 0) delete data[data.length - 1]!.color;
       s.setData(data);
     }
     if (!fitted.current && points.length > 1) {
