@@ -4,7 +4,7 @@ import { LeadLagModel } from './lead-lag';
 import { MarkoutTracker } from './markouts';
 
 describe('LeadLagModel', () => {
-  const p = { basisHalfLifeMs: 1000, maxRefAgeMs: 2000, moveWindowMs: 500, toxicMoveBps: 4, cooldownMs: 1500 };
+  const p = { basisHalfLifeMs: 1000, maxRefAgeMs: 2000, moveWindowMs: 500, toxicMoveBps: 4, toxicZ: 2.5, cooldownMs: 1500 };
 
   it('learns the basis and prices fair off the reference', () => {
     const m = new LeadLagModel(p);
@@ -35,6 +35,17 @@ describe('LeadLagModel', () => {
     m.onReference(2_000, 100.06);
     m.onReference(2_300, 99.99);
     expect(m.toxicity(2_300)).toMatchObject({ toxic: true, direction: 'down' });
+  });
+
+  it('the toxic threshold scales with volatility: routine moves of a volatile pair are not toxic', () => {
+    expect(new LeadLagModel(p).threshold(1.5)).toBe(4); // calm: the 4 bps floor
+    expect(new LeadLagModel(p).threshold(4.8)).toBeCloseTo(2.5 * 4.8 * Math.sqrt(0.5), 9); // ≈ 8.5 bps
+    const m = new LeadLagModel(p);
+    m.onReference(0, 100, 4.8);
+    m.onReference(400, 100.06, 4.8); // +6 bps: < 2.5σ of a 500 ms move at σ = 4.8
+    expect(m.toxicity(400).toxic).toBe(false);
+    m.onReference(800, 100.16, 4.8); // +10 bps within the window: toxic
+    expect(m.toxicity(800)).toMatchObject({ toxic: true, direction: 'up' });
   });
 });
 

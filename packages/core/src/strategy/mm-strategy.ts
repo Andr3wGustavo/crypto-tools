@@ -148,7 +148,7 @@ export class MarketMakerStrategy {
     const mid = (e.bid + e.ask) / 2;
     if (!(mid > 0) || e.bid >= e.ask) return; // crossed/invalid book: ignore
     if (e.venue === 'reference') {
-      this.leadLag.onReference(e.ts, mid);
+      this.leadLag.onReference(e.ts, mid, this.vol.sigmaBps());
       const tox = this.leadLag.toxicity(e.ts);
       if (tox.toxic) {
         // Pull the side that would be picked off, immediately (bypasses the re-quote throttle).

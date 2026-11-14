@@ -36,6 +36,7 @@ export function demoInputs(d: DemoPair, minutes: number): InputRecord[] {
   const out: InputRecord[] = [];
   let nextClock = 0;
   const units = 44 / d.price; // base units worth ~US$44, the SOL default trade (0.5 SOL)
+  const step = Number(d.rules.stepSize);
   for (const m of syntheticMarket({
     seed: d.seed, durationMs: minutes * 60_000, startPrice: d.price, tick: Number(d.rules.tickSize), spreadTicks: d.spreadTicks,
     tradeRatePerSec: 0.5, sweepProb: 0.15, tradeQtyMean: units, topQty: 80 * units,
@@ -45,7 +46,11 @@ export function demoInputs(d: DemoPair, minutes: number): InputRecord[] {
       out.push({ t: 'clock', ts: m.ts });
       nextClock = m.ts + 1000;
     }
-    if (m.kind === 'trade') out.push({ t: 'trade', ts: m.ts, price: m.price, qty: m.qty, aggressor: m.aggressor });
+    // A real venue prints quantities on its step grid; the generator does not.
+    if (m.kind === 'trade') {
+      const qty = Math.max(step, Math.round(m.qty / step) * step);
+      out.push({ t: 'trade', ts: m.ts, price: m.price, qty: Number(qty.toFixed(10)), aggressor: m.aggressor });
+    }
     else out.push({ t: 'book', venue: m.kind === 'ref' ? 'reference' : 'local', ts: m.ts, bid: m.bid, bidQty: m.bidQty, ask: m.ask, askQty: m.askQty });
   }
   return out;

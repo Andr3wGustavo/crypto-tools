@@ -111,7 +111,10 @@ export function buildQuoteOrders(
   if (flags.pullBid) res.skipped.push({ side: 'BUY', reason: 'toxic' });
   else if (flags.noBid) res.skipped.push({ side: 'BUY', reason: 'inventory_cap' });
   else {
-    let price = floorToStep(quote.bid, tick);
+    // The model's price, but never richer than the edge floor (fair − cost): a too-tight model
+    // quote is moved back to the floor and placed, not dropped (dropping left the bot with no
+    // order at all for minutes when the other side was blocked too).
+    let price = floorToStep(BN.min(new BN(quote.bid), new BN(fair).times(1 - params.costBps / 1e4)), tick);
     if (Number(price) >= book.ask) price = addSteps(book.ask, tick, -1);
     if (params.pennyMinSpreadTicks > 0 && spreadTicks >= params.pennyMinSpreadTicks && Number(price) === book.bid) {
       const improved = addSteps(book.bid, tick, 1);
@@ -140,7 +143,9 @@ export function buildQuoteOrders(
   // ---------- ASK (reducing side: only sells inventory we actually hold) ----------
   if (flags.pullAsk) res.skipped.push({ side: 'SELL', reason: 'toxic' });
   else {
-    let price = ceilToStep(quote.ask, tick);
+    // Same on the reducing side: an inventory skew that asks below the allowed edge is clamped up
+    // to fair · (1 + reduceMinEdge) and placed there.
+    let price = ceilToStep(BN.max(new BN(quote.ask), new BN(fair).times(1 + params.reduceMinEdgeBps / 1e4)), tick);
     if (Number(price) <= book.bid) price = addSteps(book.bid, tick, 1);
     if (params.pennyMinSpreadTicks > 0 && spreadTicks >= params.pennyMinSpreadTicks && Number(price) === book.ask) {
       const improved = addSteps(book.ask, tick, -1);

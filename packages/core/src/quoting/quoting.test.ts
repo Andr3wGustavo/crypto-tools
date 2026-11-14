@@ -112,6 +112,17 @@ describe('buildQuoteOrders', () => {
     expect(Number(r.ask!.price)).toBeGreaterThan(tight.bid);
   });
 
+  it('a model quote past the edge floor is clamped to the floor and placed, not dropped', () => {
+    // Long inventory skews the ask below fair (sell urgently), but the reducing side may not go
+    // below fair · (1 + reduceMinEdge) yet: the ask sits at that floor instead of disappearing.
+    const skewed = { ...quote, ask: 99.98, bid: 99.9 };
+    const r = buildQuoteOrders(skewed, { bid: 99.9, bidQty: 10, ask: 100.1, askQty: 10 }, rules, { quoteFree: 15, baseFree: 1 }, { ...params, reduceMinEdgeBps: 1 });
+    expect(r.ask?.price).toBe('100.01'); // ceil(100 · 1.0001)
+    expect(r.ask!.edgeBps).toBeGreaterThanOrEqual(1);
+    const rich = buildQuoteOrders({ ...quote, bid: 99.99 }, { bid: 99.9, bidQty: 10, ask: 100.1, askQty: 10 }, rules, { quoteFree: 15, baseFree: 0 }, { ...params, costBps: 3 });
+    expect(rich.bid?.price).toBe('99.97'); // floor(100 · (1 − 0.0003))
+  });
+
   it('pennies the best by one tick only when the edge survives', () => {
     const wide = { bid: 99.95, bidQty: 10, ask: 100.05, askQty: 10 };
     const r = buildQuoteOrders(quote, wide, rules, { quoteFree: 15, baseFree: 1 }, { ...params, pennyMinSpreadTicks: 3 });

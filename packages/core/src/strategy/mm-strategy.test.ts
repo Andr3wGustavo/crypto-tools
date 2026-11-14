@@ -131,9 +131,10 @@ describe('MarketMakerStrategy (closed loop on a synthetic market)', () => {
   });
 
   it('kill switch: holding inventory into a collapse kills the bot and nothing is placed afterwards', () => {
-    // Budget 0.15: since the dust fix the bot unloads its inventory fast enough to stay under 0.3
-    // in this collapse (max loss 0.25), so the kill switch needs a tighter budget to be exercised.
-    const cfg = makeConfig({ risk: { ...makeConfig().risk, lossBudgetQuote: 0.15, maxDrawdownPct: 0.5, dailyLossPct: 0.5 } });
+    // Budget 0.06: since the 2026-11-13 fixes (dust, edge-floor clamping) the bot unloads its
+    // inventory early enough to lose only ~0.10 in this collapse (it lost > 0.3 before), so the
+    // kill switch needs a tighter budget to be exercised.
+    const cfg = makeConfig({ risk: { ...makeConfig().risk, lossBudgetQuote: 0.06, maxDrawdownPct: 0.5, dailyLossPct: 0.5 } });
     const r = run(
       { seed: 4, durationMs: 20 * 60_000, driftBpsPerS: -6, sigmaBpsPerSqrtS: 2, informedProb: 0.9 },
       cfg,
