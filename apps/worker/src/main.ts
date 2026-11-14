@@ -124,7 +124,7 @@ async function main(): Promise<void> {
         noteError();
         log.error({ action: o.action }, 'strategy error');
       } else if (o.kind === 'action' && o.action.kind === 'status') log.warn({ action: o.action }, 'strategy status');
-      else if (o.kind === 'action' && o.action.kind === 'risk' && o.action.action !== 'reduce_only') log.warn({ risk: o.action }, 'risk');
+      else if (o.kind === 'action' && o.action.kind === 'risk' && o.action.action !== 'reduce_only' && o.action.action !== 'ok') log.warn({ risk: o.action }, 'risk');
       else if (o.kind === 'reconcile') log.error({ reconcile: o }, 'ledger/strategy divergence — halted');
       else if (o.kind === 'edge') log.info({ edge: o }, 'edge window closed');
     }

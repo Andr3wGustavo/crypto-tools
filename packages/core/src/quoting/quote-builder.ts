@@ -1,5 +1,5 @@
 import type { AsQuote } from './avellaneda';
-import { BN, addSteps, ceilToStep, decimalsOf, floorToStep } from './tick';
+import { BN, addSteps, ceilToStep, decimalsOf, floorToStep, type BNValue } from './tick';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -72,6 +72,16 @@ export class QuoteSanityError extends Error {
   override name = 'QuoteSanityError';
 }
 
+/**
+ * Largest step multiple we can sell out of `held`. floorToStep alone may snap UP by < 1e-9 step
+ * (it absorbs binary-float noise), which must never make a sell exceed what we hold.
+ */
+export function sellableQty(held: BNValue, step: string): string {
+  let q = floorToStep(held, step);
+  while (new BN(q).gt(held) && new BN(q).gt(0)) q = addSteps(q, step, -1);
+  return q;
+}
+
 const edgeBid = (price: number, fair: number) => ((fair - price) / fair) * 1e4;
 const edgeAsk = (price: number, fair: number) => ((price - fair) / fair) * 1e4;
 
@@ -136,13 +146,11 @@ export function buildQuoteOrders(
     const edge = edgeAsk(p, fair);
     const wanted = new BN(params.orderNotional).div(price);
     const held = new BN(bal.baseFree);
-    let qty = floorToStep(BN.min(wanted, held), rules.stepSize);
+    const all = sellableQty(held, rules.stepSize);
+    let qty = floorToStep(BN.min(wanted, all), rules.stepSize);
     // Never leave unsellable dust behind: if what would remain after this sell is below the
     // exchange minimum, sell everything we hold in this order instead.
-    const all = floorToStep(held, rules.stepSize);
     if (new BN(qty).lt(all) && held.minus(qty).times(p).lt(rules.minNotional)) qty = all;
-    // floorToStep snaps values within 1e-9 step of a multiple; never round *up* past what we hold.
-    while (new BN(qty).gt(held) && new BN(qty).gt(0)) qty = addSteps(qty, rules.stepSize, -1);
     const value = Number(qty) * p;
     if (held.times(p).lt(rules.minNotional) || new BN(qty).lt(rules.minQty) || value < rules.minNotional) {
       res.skipped.push({ side: 'SELL', reason: held.gt(0) && held.times(p).gte(rules.minNotional) ? 'below_min' : 'no_inventory' });

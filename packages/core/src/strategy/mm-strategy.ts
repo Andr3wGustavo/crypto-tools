@@ -1,7 +1,7 @@
 import { AverageCostPosition } from '../accounting/position';
 import { DEFAULT_AS_PARAMS, computeAsQuote } from '../quoting/avellaneda';
-import { QuoteSanityError, buildQuoteOrders, type BookTop, type OrderTarget, type Side } from '../quoting/quote-builder';
-import { floorToStep } from '../quoting/tick';
+import { QuoteSanityError, buildQuoteOrders, sellableQty, type BookTop, type OrderTarget, type Side } from '../quoting/quote-builder';
+import { snapQty } from '../quoting/tick';
 import { DEFAULT_RISK_LIMITS, evaluateRisk, type RiskAction, type RiskViolation } from '../risk/risk-manager';
 import { DEFAULT_LEAD_LAG, LeadLagModel } from '../signals/lead-lag';
 import { DEFAULT_MARKOUTS, MarkoutTracker } from '../signals/markouts';
@@ -21,6 +21,10 @@ interface WorkingOrder {
 }
 
 const DAY_MS = 86_400_000;
+/** A risk state that persists is repeated at most this often (it is evaluated every second). */
+export const RISK_REPEAT_MS = 60_000;
+/** The strategy's inventory cap as a fraction of the risk manager's hard cap. */
+export const INVENTORY_CAP_MARGIN = 0.9;
 const EPS = 1e-12;
 
 export function defaultStrategyConfig(overrides: Partial<StrategyConfig> & Pick<StrategyConfig, 'botId' | 'base' | 'quote' | 'rules'>): StrategyConfig {
@@ -56,6 +60,9 @@ export class MarketMakerStrategy {
   private haltRule: string | undefined;
   private riskPaused = false;
   private reduceOnly = false;
+  /** Last risk state emitted (action + rules) and when: risk events are emitted on change. */
+  private riskSig = 'ok';
+  private riskSigTs = Number.NEGATIVE_INFINITY;
   /** Live only (see StrategyEvent 'venue'); always null in shadow. */
   private venueHold: string | null = null;
 
@@ -178,13 +185,16 @@ export class MarketMakerStrategy {
     const feeQuote = e.feeAsset === 'quote' ? e.fee : 0;
     const feeBase = e.feeAsset === 'base' ? e.fee : 0;
     const notional = e.price * e.qty;
+    // Base quantities are exchange decimals: keep the running total decimal-exact (12 places),
+    // as the ledger is. A float residue (0.01999999999999999 for 0.02) made the 0.02 unsellable
+    // while the dust check still saw 0.02: the bot froze (AFK review 2026-11-13).
     if (e.side === 'BUY') {
       this.quoteTotal -= notional + feeQuote;
-      this.baseTotal += e.qty - feeBase;
+      this.baseTotal = snapQty(this.baseTotal + e.qty - feeBase);
       if (this.inventorySince === undefined) this.inventorySince = e.ts;
     } else {
       this.quoteTotal += notional - feeQuote;
-      this.baseTotal -= e.qty + feeBase;
+      this.baseTotal = snapQty(this.baseTotal - e.qty - feeBase);
     }
     if (this.baseTotal < EPS) {
       this.baseTotal = Math.max(0, this.baseTotal);
@@ -277,7 +287,15 @@ export class MarketMakerStrategy {
   }
 
   private applyRisk(ts: number, action: RiskAction, violations: RiskViolation[], out: StrategyAction[]): void {
-    if (action !== 'ok') out.push({ kind: 'risk', ts, action, violations });
+    // Emit on change (including the return to ok), and repeat a persisting state once a minute:
+    // evaluated every second, an hour-long pause would otherwise flood the event log with 3 600
+    // identical events and push the useful history out of the capped stream.
+    const sig = action === 'ok' ? 'ok' : `${action}:${violations.map((v) => v.rule).sort().join(',')}`;
+    if (sig !== this.riskSig || (action !== 'ok' && ts - this.riskSigTs >= RISK_REPEAT_MS)) {
+      out.push({ kind: 'risk', ts, action, violations });
+      this.riskSig = sig;
+      this.riskSigTs = ts;
+    }
     this.reduceOnly = action === 'reduce_only';
     if (action === 'kill' && this.status !== 'killed') {
       this.setStatus(ts, 'killed', violations.map((v) => v.rule).join(','), out);
@@ -320,7 +338,10 @@ export class MarketMakerStrategy {
     const fair = this.lastFair;
     const equity = this.equity();
     const orderNotional = Math.max(this.cfg.rules.minNotional * this.cfg.minOrderMultiple, this.cfg.orderFraction * equity);
-    const maxInv = Math.max(orderNotional, this.cfg.maxInventoryFraction * equity);
+    // The strategy's own cap stays 10% under the risk manager's hard cap: otherwise, once equity
+    // grows, the bot buys up to 20% of equity, trips reduce_only at the fixed limit and flaps as
+    // the price wiggles around it. The margin absorbs a 10% mark-to-market rise of a full position.
+    const maxInv = Math.min(Math.max(orderNotional, this.cfg.maxInventoryFraction * equity), INVENTORY_CAP_MARGIN * this.cfg.risk.maxInventoryNotional);
     const invNotional = this.baseTotal * fair;
     const q = Math.min(1, Math.max(0, invNotional / maxInv));
     const sigmaBps = this.vol.sigmaBps();
@@ -352,7 +373,7 @@ export class MarketMakerStrategy {
     // position becomes sellable; the cap is exceeded by at most one minimum order (+ one step).
     const minOrderValue = this.cfg.rules.minNotional * this.cfg.minOrderMultiple;
     const baseFree = Math.max(0, this.baseTotal - baseLocked);
-    const sellable = Number(floorToStep(baseFree, this.cfg.rules.stepSize)) * fair >= this.cfg.rules.minNotional;
+    const sellable = Number(sellableQty(baseFree, this.cfg.rules.stepSize)) * fair >= this.cfg.rules.minNotional;
     const dust = this.baseTotal > EPS && !sellable;
     let bidNotional = Math.min(orderNotional, maxInv - invNotional);
     let capBlocksBid = bidNotional < minOrderValue - EPS;

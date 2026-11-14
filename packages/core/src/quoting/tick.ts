@@ -32,6 +32,9 @@ export function addSteps(v: BNValue, step: string, n: number): string {
   return new BN(v).plus(new BN(step).times(n)).toFixed(decimalsOf(step));
 }
 
+/** Round a quantity to 12 decimals (far below any exchange step) to remove binary-float residue. */
+export const snapQty = (x: number): number => Number(x.toFixed(12));
+
 export function notional(price: BNValue, qty: BNValue): string {
   return new BN(price).times(qty).toFixed();
 }

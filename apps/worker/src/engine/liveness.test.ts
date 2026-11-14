@@ -7,14 +7,16 @@ import { ShadowEngine } from './shadow-engine';
  * every health check stays green. Found in the 2026-11-13 review: a partial fill left inventory
  * too small to sell (under the US$1 minimum after step rounding) and too close to the cap to
  * buy — the bot never quoted again (seed 11 stopped at minute 3). A float residue in partial
- * fills could also make a "sell everything" order exceed the exact ledger and crash the engine.
+ * fills could also make a "sell everything" order exceed the exact ledger and crash the engine,
+ * and a float residue in the strategy's own total (0.01999999999999999 for 0.02) made the
+ * position unsellable while the dust check still saw 0.02 (seed 3 froze at minute 26).
  *
  * Invariant: on a healthy market the bot always has a fresh order out, on any seed (checked for
- * 2 h × 7 seeds by hand; 30 min × 3 seeds here to keep CI fast).
+ * 2 h × 7 seeds by hand, max gap 14.5 s; 45 min × 4 seeds here to keep CI fast).
  */
 describe('AFK liveness (synthetic market)', () => {
-  it.each([3, 11, 23])('seed %i: never goes more than 30 s without placing, and never crashes', async (seed) => {
-    const recs = syntheticInputs(30, seed);
+  it.each([3, 7, 11, 23])('seed %i: never goes more than 30 s without placing, and never crashes', async (seed) => {
+    const recs = syntheticInputs(45, seed);
     const e = new ShadowEngine(testEngineOptions);
     let last = recs[0]!.ts;
     let maxGap = 0;

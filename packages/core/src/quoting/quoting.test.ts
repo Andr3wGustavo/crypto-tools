@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { mulberry32 } from '../math/rng';
 import { DEFAULT_AS_PARAMS, computeAsQuote, liquidityTermBps } from './avellaneda';
 import { fitFillIntensity, maxProfitRate, optimalDeltaBps, profitRate, tradeDistanceBps } from './fill-intensity';
-import { QuoteSanityError, buildQuoteOrders, type SymbolRules } from './quote-builder';
+import { QuoteSanityError, buildQuoteOrders, sellableQty, type SymbolRules } from './quote-builder';
 import { BN, ceilToStep, decimalsOf, floorToStep } from './tick';
 
 describe('tick rounding', () => {
@@ -141,6 +141,13 @@ describe('buildQuoteOrders', () => {
     it('sells everything instead of leaving unsellable dust', () => {
       const r = buildQuoteOrders(solQuote, solBook, sol, { quoteFree: 15, baseFree: 0.03 }, params);
       expect(r.ask?.qty).toBe('0.03'); // 0.02 would leave 0.01 ≈ US$0.88, which could never be sold
+    });
+
+    it('sellableQty: the largest step multiple not above what we hold', () => {
+      expect(sellableQty('0.029999999999', '0.01')).toBe('0.02'); // floorToStep alone snaps to 0.03
+      expect(sellableQty('0.03', '0.01')).toBe('0.03');
+      expect(sellableQty(0.0128, '0.01')).toBe('0.01');
+      expect(sellableQty('0.009', '0.01')).toBe('0.00');
     });
 
     it('never sells more than it holds, even when step snapping would round up', () => {

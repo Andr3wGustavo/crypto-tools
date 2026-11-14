@@ -32,7 +32,9 @@ export function describe(e: BotEvent): { text: string; tone: Tone } {
     case 'status':
       return { text: `Status → ${e.status}${e.quoting ? '' : ' (sem cotar)'}: ${e.reason}`, tone: e.status === 'running' ? 'up' : 'warn' };
     case 'risk':
-      return { text: `Risco: ${e.action}${e.violations.length ? ` · ${e.violations.join('; ')}` : ''}`, tone: 'warn' };
+      return e.action === 'ok'
+        ? { text: 'Risco: normalizado', tone: 'up' }
+        : { text: `Risco: ${e.action}${e.violations.length ? ` · ${e.violations.join('; ')}` : ''}`, tone: 'warn' };
     case 'error':
       return { text: e.message, tone: 'down' };
     case 'edge':

@@ -832,4 +832,4 @@ export class LiveEngine {
 }
 
 /** 2: treasury fields (E9). */
-export const LIVE_STATE_VERSION = 2;
+export const LIVE_STATE_VERSION = 3; // v3: strategy risk-emission state (2026-11-13)

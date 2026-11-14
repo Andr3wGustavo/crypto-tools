@@ -131,7 +131,9 @@ describe('MarketMakerStrategy (closed loop on a synthetic market)', () => {
   });
 
   it('kill switch: holding inventory into a collapse kills the bot and nothing is placed afterwards', () => {
-    const cfg = makeConfig({ risk: { ...makeConfig().risk, lossBudgetQuote: 0.3, maxDrawdownPct: 0.5, dailyLossPct: 0.5 } });
+    // Budget 0.15: since the dust fix the bot unloads its inventory fast enough to stay under 0.3
+    // in this collapse (max loss 0.25), so the kill switch needs a tighter budget to be exercised.
+    const cfg = makeConfig({ risk: { ...makeConfig().risk, lossBudgetQuote: 0.15, maxDrawdownPct: 0.5, dailyLossPct: 0.5 } });
     const r = run(
       { seed: 4, durationMs: 20 * 60_000, driftBpsPerS: -6, sigmaBpsPerSqrtS: 2, informedProb: 0.9 },
       cfg,
@@ -147,8 +149,30 @@ describe('MarketMakerStrategy (closed loop on a synthetic market)', () => {
     const r = run({ seed: 5, durationMs: 5 * 60_000 }, makeConfig(), { stopLocalAfterMs: 2 * 60_000 });
     const risk = r.actions.filter((a) => a.kind === 'risk' && a.action === 'pause');
     expect(risk.length).toBeGreaterThan(0);
+    // Emitted on change and repeated once a minute, not every second: ~3 min stale → ≤ 4 events.
+    expect(risk.length).toBeLessThanOrEqual(4);
     const lastPlace = r.actions.filter((a) => a.kind === 'place').pop()!;
     expect(lastPlace.ts).toBeLessThanOrEqual(r.actions[0]!.ts + 2 * 60_000 + 5_000);
+  });
+
+  it('with equity above the base size, the strategy cap stays under the risk hard cap (no reduce_only flapping)', () => {
+    // 0.2 × US$25 = US$5 > the US$3 hard cap: without the min() the bot buys past 3 and flaps.
+    const r = run({ ...MARKET, seed: 3, durationMs: 10 * 60_000 }, makeConfig(), { initial: { quote: 25, base: 0 } });
+    expect(r.fills).toBeGreaterThan(0);
+    expect(r.actions.filter((a) => a.kind === 'risk' && a.action === 'reduce_only')).toEqual([]);
+  });
+
+  it('base balance stays decimal-exact through partial fills (no 0.01999999999999999)', () => {
+    const s = new MarketMakerStrategy(makeConfig(), { quote: 15, base: 0 });
+    s.handle({ kind: 'book', venue: 'reference', ts: 0, bid: 149.9, bidQty: 5, ask: 150.1, askQty: 5 });
+    const placed = s.handle({ kind: 'book', venue: 'local', ts: 1, bid: 149.9, bidQty: 5, ask: 150.1, askQty: 5 }).find((a) => a.kind === 'place' && a.side === 'BUY');
+    expect(placed).toBeDefined();
+    const id = (placed as { clientOrderId: string }).clientOrderId;
+    s.handle({ kind: 'order', ts: 2, clientOrderId: id, status: 'NEW' });
+    for (const [i, q] of [0.0079, 0.0121, 0.0003].entries()) {
+      s.handle({ kind: 'fill', ts: 3 + i, clientOrderId: id, fillId: `f${i}`, side: 'BUY', price: 150, qty: q, fee: 0, feeAsset: 'quote' });
+    }
+    expect(s.snapshot().baseTotal).toBe(0.0203); // a float sum gives 0.020300000000000002
   });
 
   it('pulls the vulnerable side when the reference venue jumps (lead–lag)', () => {

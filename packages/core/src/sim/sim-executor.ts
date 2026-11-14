@@ -1,4 +1,5 @@
 import type { BookTop, Side } from '../quoting/quote-builder';
+import { snapQty } from '../quoting/tick';
 
 /**
  * Conservative shadow-mode fill simulator over real public market data.
@@ -159,6 +160,3 @@ function queueAhead(o: SimOrder, b: BookTop | undefined): number {
   if (o.price === b.ask) return b.askQty;
   return Number.POSITIVE_INFINITY;
 }
-
-/** Round to 12 decimals (far below any exchange step) to remove binary-float residue. */
-export const snapQty = (x: number): number => Number(x.toFixed(12));

@@ -44,9 +44,12 @@ export interface ShadowEngineOptions {
  * v2 behavior (2026-11-13, AFK review): bid sized to the room under the inventory cap, dust
  * inventory unstuck with one minimum order, sells never leave unsellable dust, sim fills snapped
  * to decimals. Fixes a deadlock where the bot stopped quoting forever (see liveness.test.ts).
+ * Risk events are emitted on change (+ once a minute while a state persists, + on the return to
+ * ok), and the strategy's inventory cap never exceeds the risk manager's hard cap.
+ * v3 state: the strategy remembers the last risk state it emitted.
  */
 export const ENGINE_BEHAVIOR_VERSION = 2;
-export const ENGINE_STATE_VERSION = 2;
+export const ENGINE_STATE_VERSION = 3;
 
 /** Everything needed to resume the engine exactly where it stopped. */
 export interface EngineSnapshot {
